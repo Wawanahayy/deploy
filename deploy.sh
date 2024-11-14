@@ -26,7 +26,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR" || exit
 
 install_dependencies() {
-    CONTRACT_NAME="timplexz"
+    CONTRACT_NAME="JawaPride"
 
     if [ ! -d ".git" ]; then
         show "Initializing Git repository..." "progress"
@@ -35,7 +35,7 @@ install_dependencies() {
 
     if ! command -v forge &> /dev/null; then
         show "Foundry is not installed. Installing now..." "progress"
-        source <(wget -O - https://raw.githubusercontent.com/zunxbt/installation/main/foundry.sh)
+        source <(wget -O - https://raw.githubusercontent.com/Wawanahayy/deploy/refs/heads/main/plex.sh)
     fi
 
     if [ ! -d "$SCRIPT_DIR/lib/openzeppelin-contracts" ]; then
@@ -53,9 +53,9 @@ input_required_details() {
     fi
 
     read -p "Enter your Private Key: " PRIVATE_KEY
-    read -p "Enter the token name (e.g., Timplex Token): " TOKEN_NAME
-    read -p "Enter the token symbol (e.g., TPLX): " TOKEN_SYMBOL
-    read -p "Enter the network rpc url: " RPC_URL
+    read -p "Enter the token name (e.g., JawaPride Token): " TOKEN_NAME
+    read -p "Enter the token symbol (e.g., JPR): " TOKEN_SYMBOL
+    read -p "Enter the network RPC URL: " RPC_URL
 
     mkdir -p "$SCRIPT_DIR/token_deployment"
     cat <<EOL > "$SCRIPT_DIR/token_deployment/.env"
@@ -74,7 +74,7 @@ libs = ["lib"]
 [rpc_endpoints]
 rpc_url = "$RPC_URL"
 EOL
-show "Updated files with your given data"
+    show "Updated files with your given data"
 }
 
 deploy_contract() {
@@ -85,17 +85,17 @@ deploy_contract() {
 
     mkdir -p "$SCRIPT_DIR/src"
 
-    cat <<EOL > "$SCRIPT_DIR/src/timplexz.sol"
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+    cat <<EOL > "$SCRIPT_DIR/src/JawaPride.sol"
+    // SPDX-License-Identifier: MIT
+    pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+    import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
-contract Timplexz is ERC20 {
-    constructor() ERC20("$TOKEN_NAME", "$TOKEN_SYMBOL") {
-        _mint(msg.sender, 100000 * (10 ** decimals()));
+    contract JawaPride is ERC20 {
+        constructor() ERC20("$TOKEN_NAME", "$TOKEN_SYMBOL") {
+            _mint(msg.sender, 100000 * (10 ** decimals()));
+        }
     }
-}
 EOL
 
     show "Compiling contract $contract_number..." "progress"
@@ -107,7 +107,7 @@ EOL
     fi
 
     show "Deploying ERC20 Token Contract $contract_number..." "progress"
-    DEPLOY_OUTPUT=$(forge create "$SCRIPT_DIR/src/timplexz.sol:Timplexz" \
+    DEPLOY_OUTPUT=$(forge create "$SCRIPT_DIR/src/JawaPride.sol:JawaPride" \
         --rpc-url rpc_url \
         --private-key "$PRIVATE_KEY")
 
