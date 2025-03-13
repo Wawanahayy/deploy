@@ -31,6 +31,7 @@ install_dependencies() {
         show "Foundry is not installed. Installing now..." "progress"
         curl -L https://foundry.paradigm.xyz | bash
         source ~/.bashrc
+        foundryup
     fi
 
     if [ ! -d "$SCRIPT_DIR/lib/openzeppelin-contracts" ]; then
@@ -40,6 +41,15 @@ install_dependencies() {
         show "OpenZeppelin Contracts already installed."
     fi
 }
+
+# Ensure Foundry is available before proceeding
+if ! command -v forge &>/dev/null; then
+    show "Forge not found after installation. Please restart your terminal or run 'source ~/.bashrc' manually." "error"
+    exit 1
+fi
+
+# Ensure src directory exists before contract deployment
+mkdir -p "$SCRIPT_DIR/src"
 
 input_required_details() {
     echo -e "-----------------------------------"
@@ -56,6 +66,7 @@ input_required_details() {
 PRIVATE_KEY="$PRIVATE_KEY"
 TOKEN_NAME="$TOKEN_NAME"
 TOKEN_SYMBOL="$TOKEN_SYMBOL"
+RPC_URL="$RPC_URL"
 EOL
 
     source "$SCRIPT_DIR/token_deployment/.env"
