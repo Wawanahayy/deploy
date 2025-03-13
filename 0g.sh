@@ -144,6 +144,26 @@ deploy_multiple_contracts() {
     done
 }
 
+menu() {
+    echo -e "\n${YELLOW}┌─────────────────────────────────────────────────────┐${NORMAL}"
+    echo -e "${YELLOW}│              Script Menu Options                    │${NORMAL}"
+    echo -e "${YELLOW}├─────────────────────────────────────────────────────┤${NORMAL}"
+    echo -e "${YELLOW}│  1) Install dependencies                            │${NORMAL}"
+    echo -e "${YELLOW}│  2) Input required details                          │${NORMAL}"
+    echo -e "${YELLOW}│  3) Deploy contract(s)                              │${NORMAL}"
+    echo -e "${YELLOW}│  4) Exit                                           │${NORMAL}"
+    echo -e "${YELLOW}└─────────────────────────────────────────────────────┘${NORMAL}"
+
+    read -p "Enter your choice: " CHOICE
+    case $CHOICE in
+        1) install_dependencies ;;
+        2) input_required_details ;;
+        3) deploy_multiple_contracts ;;
+        4) exit 0 ;;
+        *) show "Invalid choice." "error" ;;
+    esac
+}
+
 while true; do
     menu
 done
