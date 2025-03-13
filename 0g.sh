@@ -45,7 +45,7 @@ install_dependencies() {
 
     if [ ! -d "$SCRIPT_DIR/lib/openzeppelin-contracts" ]; then
         show "Installing OpenZeppelin Contracts..." "progress"
-        git clone https://github.com/OpenZeppelin/openzeppelin-contracts.git "$SCRIPT_DIR/lib/openzeppelin-contracts"
+        mkdir -p "$SCRIPT_DIR/lib" && git clone https://github.com/OpenZeppelin/openzeppelin-contracts.git "$SCRIPT_DIR/lib/openzeppelin-contracts"
     else
         show "OpenZeppelin Contracts already installed."
     fi
