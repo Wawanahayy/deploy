@@ -17,7 +17,11 @@ show() {
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR" || exit
+if [ -z "$SCRIPT_DIR" ]; then
+    show "Failed to determine script directory." "error"
+    exit 1
+fi
+mkdir -p "$SCRIPT_DIR/src"
 
 install_dependencies() {
     CONTRACT_NAME="JawaPride"
@@ -34,6 +38,11 @@ install_dependencies() {
         foundryup
     fi
 
+    if ! command -v forge &>/dev/null; then
+        show "Forge installation failed. Please restart terminal or run 'source ~/.bashrc' manually." "error"
+        exit 1
+    fi
+
     if [ ! -d "$SCRIPT_DIR/lib/openzeppelin-contracts" ]; then
         show "Installing OpenZeppelin Contracts..." "progress"
         git clone https://github.com/OpenZeppelin/openzeppelin-contracts.git "$SCRIPT_DIR/lib/openzeppelin-contracts"
@@ -41,15 +50,6 @@ install_dependencies() {
         show "OpenZeppelin Contracts already installed."
     fi
 }
-
-# Ensure Foundry is available before proceeding
-if ! command -v forge &>/dev/null; then
-    show "Forge not found after installation. Please restart your terminal or run 'source ~/.bashrc' manually." "error"
-    exit 1
-fi
-
-# Ensure src directory exists before contract deployment
-mkdir -p "$SCRIPT_DIR/src"
 
 input_required_details() {
     echo -e "-----------------------------------"
@@ -87,8 +87,12 @@ deploy_contract() {
     echo -e "-----------------------------------"
     source "$SCRIPT_DIR/token_deployment/.env"
 
+    if ! command -v forge &>/dev/null; then
+        show "Forge is not installed. Cannot proceed with deployment." "error"
+        exit 1
+    fi
+
     local contract_number=$1
-    mkdir -p "$SCRIPT_DIR/src"
 
     cat <<EOL > "$SCRIPT_DIR/src/JawaPride.sol"
 // SPDX-License-Identifier: MIT
@@ -140,24 +144,6 @@ deploy_multiple_contracts() {
     done
 }
 
-menu() {
-    echo -e "\n${YELLOW}┌─────────────────────────────────────────────────────┐${NORMAL}"
-    echo -e "${YELLOW}│              Script Menu Options                    │${NORMAL}"
-    echo -e "${YELLOW}├─────────────────────────────────────────────────────┤${NORMAL}"
-    echo -e "${YELLOW}│  1) Install dependencies                            │${NORMAL}"
-    echo -e "${YELLOW}│  2) Input required details                          │${NORMAL}"
-    echo -e "${YELLOW}│  3) Deploy contract(s)                              │${NORMAL}"
-    echo -e "${YELLOW}│  4) Exit                                           │${NORMAL}"
-    echo -e "${YELLOW}└─────────────────────────────────────────────────────┘${NORMAL}"
-
-    read -p "Enter your choice: " CHOICE
-    case $CHOICE in
-        1) install_dependencies ;;
-        2) input_required_details ;;
-        3) deploy_multiple_contracts ;;
-        4) exit 0 ;;
-        *) show "Invalid choice." "error" ;;
-    esac
-}
-
-while true; do menu; done
+while true; do
+    menu
+done
