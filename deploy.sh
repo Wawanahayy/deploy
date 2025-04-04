@@ -26,7 +26,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR" || exit
 
 install_dependencies() {
-    CONTRACT_NAME="JawaPride"
+    CONTRACT_NAME="RandomToken"
 
     if [ ! -d ".git" ]; then
         show "Initializing Git repository..." "progress"
@@ -52,9 +52,14 @@ input_required_details() {
         rm "$SCRIPT_DIR/token_deployment/.env"
     fi
 
+    # Nama dan simbol token akan acak
+    RANDOM_NAME=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 10)
+    TOKEN_NAME="Token_$RANDOM_NAME"
+
+    RANDOM_SYMBOL=$(head /dev/urandom | tr -dc A-Z | head -c 3)
+    TOKEN_SYMBOL="$RANDOM_SYMBOL"
+
     read -p "Enter your Private Key: " PRIVATE_KEY
-    read -p "Enter the token name (e.g., JawaPride Token): " TOKEN_NAME
-    read -p "Enter the token symbol (e.g., JPR): " TOKEN_SYMBOL
     read -p "Enter the network RPC URL: " RPC_URL
 
     mkdir -p "$SCRIPT_DIR/token_deployment"
@@ -85,14 +90,14 @@ deploy_contract() {
 
     mkdir -p "$SCRIPT_DIR/src"
 
-    cat <<EOL > "$SCRIPT_DIR/src/JawaPride.sol"
+    cat <<EOL > "$SCRIPT_DIR/src/RandomToken.sol"
     // SPDX-License-Identifier: MIT
     pragma solidity ^0.8.20;
 
     import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
-    contract JawaPride is ERC20 {
-        constructor() ERC20("$TOKEN_NAME", "$TOKEN_SYMBOL") {
+    contract RandomToken is ERC20 {
+        constructor() ERC20("${RANDOM_NAME}", "${RANDOM_SYMBOL}") {
             _mint(msg.sender, 100000 * (10 ** decimals()));
         }
     }
@@ -107,9 +112,10 @@ EOL
     fi
 
     show "Deploying ERC20 Token Contract $contract_number..." "progress"
-    DEPLOY_OUTPUT=$(forge create "$SCRIPT_DIR/src/JawaPride.sol:JawaPride" \
-        --rpc-url rpc_url \
-        --private-key "$PRIVATE_KEY")
+    DEPLOY_OUTPUT=$(forge create "$SCRIPT_DIR/src/RandomToken.sol:RandomToken" \
+        --rpc-url "$RPC_URL" \
+        --private-key "$PRIVATE_KEY" \
+        --broadcast)  # Added --broadcast to actually deploy the contract
 
     if [[ $? -ne 0 ]]; then
         show "Deployment of contract $contract_number failed." "error"
@@ -128,16 +134,21 @@ deploy_multiple_contracts() {
         exit 1
     fi
 
-    ORIGINAL_TOKEN_NAME=$TOKEN_NAME
-
     for (( i=1; i<=NUM_CONTRACTS; i++ ))
     do
-        if [[ $i -gt 1 ]]; then
-            RANDOM_SUFFIX=$(head /dev/urandom | tr -dc A-Z | head -c 2)
-            TOKEN_NAME="${RANDOM_SUFFIX}${ORIGINAL_TOKEN_NAME}"
-        else
-            TOKEN_NAME=$ORIGINAL_TOKEN_NAME
-        fi
+        # Nama dan simbol token dibuat acak setiap kali
+        RANDOM_NAME=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 10)
+        TOKEN_NAME="Token_$RANDOM_NAME"
+
+        RANDOM_SYMBOL=$(head /dev/urandom | tr -dc A-Z | head -c 3)
+        TOKEN_SYMBOL="$RANDOM_SYMBOL"
+
+        # Perbarui file .env untuk menyimpan nama & simbol token yang diacak
+        echo "TOKEN_NAME=\"$TOKEN_NAME\"" > "$SCRIPT_DIR/token_deployment/.env"
+        echo "TOKEN_SYMBOL=\"$TOKEN_SYMBOL\"" >> "$SCRIPT_DIR/token_deployment/.env"
+
+        source "$SCRIPT_DIR/token_deployment/.env"
+
         deploy_contract "$i"
         echo -e "-----------------------------------"
     done
