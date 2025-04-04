@@ -87,7 +87,7 @@ deploy_contract() {
 
     cat <<EOL > "$SCRIPT_DIR/src/JawaPride.sol"
     // SPDX-License-Identifier: MIT
-    pragma solidity ^0.8.19;
+    pragma solidity ^0.8.20;
 
     import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
