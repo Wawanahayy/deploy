@@ -1,8 +1,12 @@
 #!/bin/bash
 
+curl -s https://raw.githubusercontent.com/Wawanahayy/JawaPride-all.sh/refs/heads/main/display.sh | bash
+sleep 3
+
 BOLD=$(tput bold)
 NORMAL=$(tput sgr0)
 PINK='\033[1;35m'
+YELLOW='\033[1;33m'
 
 show() {
     case $2 in
@@ -18,69 +22,183 @@ show() {
     esac
 }
 
-check_foundry_installed() {
-    if command -v forge >/dev/null 2>&1; then
-        show "Foundry is already installed."
-        return 0
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR" || exit
+
+install_dependencies() {
+    CONTRACT_NAME="RandomToken"
+
+    if [ ! -d ".git" ]; then
+        show "Initializing Git repository..." "progress"
+        git init
+    fi
+
+    if ! command -v forge &> /dev/null; then
+        show "Foundry is not installed. Installing now..." "progress"
+        source <(wget -O - https://raw.githubusercontent.com/Wawanahayy/deploy/refs/heads/main/plex.sh)
+    fi
+
+    if [ ! -d "$SCRIPT_DIR/lib/openzeppelin-contracts" ]; then
+        show "Installing OpenZeppelin Contracts..." "progress"
+        git clone https://github.com/OpenZeppelin/openzeppelin-contracts.git "$SCRIPT_DIR/lib/openzeppelin-contracts"
     else
-        return 1
+        show "OpenZeppelin Contracts already installed."
     fi
 }
 
-install_foundry() {
-    show "Installing Foundry..." "progress"
-    curl -L https://foundry.paradigm.xyz | bash
-
-    export PATH="$HOME/.foundry/bin:$PATH"
-
-    show "Installing essential tools: cast, anvil..." "progress"
-    foundryup
-}
-
-add_foundry_to_path() {
-    if grep -q "foundry/bin" "$HOME/.bashrc" || grep -q "foundry/bin" "$HOME/.zshrc"; then
-        show "Foundry is already added to PATH."
-    else
-        show "Adding Foundry to PATH..." "progress"
-
-        if [ -f "$HOME/.bashrc" ]; then
-            echo 'export PATH="$HOME/.foundry/bin:$PATH"' >> "$HOME/.bashrc"
-        elif [ -f "$HOME/.zshrc" ]; then
-            echo 'export PATH="$HOME/.foundry/bin:$PATH"' >> "$HOME/.zshrc"
-        else
-            echo 'export PATH="$HOME/.foundry/bin:$PATH"' >> "$HOME/.profile"
-        fi
-    fi
-}
-
-validate_path() {
-    show "Validating PATH setup..." "progress"
-    if ! command -v forge >/dev/null 2>&1 || ! command -v cast >/dev/null 2>&1 || ! command -v anvil >/dev/null 2>&1; then
-        show "Error: PATH not properly set in the current session." "error"
-        return 1
-    else
-        show "Foundry tools are working fine in the current session."
+input_required_details() {
+    echo -e "-----------------------------------"
+    if [ -f "$SCRIPT_DIR/token_deployment/.env" ]; then
+        rm "$SCRIPT_DIR/token_deployment/.env"
     fi
 
-    future_shell_test=$(bash -c "command -v forge && command -v cast && command -v anvil")
-    if [ -z "$future_shell_test" ]; then
-        show "Error: PATH not properly set for future shell sessions." "error"
-        return 1
-    else
-        show "Foundry tools are working fine in future shell sessions."
-    fi
+    RANDOM_NAME=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 10)
+    TOKEN_NAME="Token_$RANDOM_NAME"
 
-    return 0
+    RANDOM_SYMBOL=$(head /dev/urandom | tr -dc A-Z | head -c 3)
+    TOKEN_SYMBOL="$RANDOM_SYMBOL"
+
+    read -p "Enter your Private Key: " PRIVATE_KEY
+    read -p "Enter the network RPC URL: " RPC_URL
+
+    mkdir -p "$SCRIPT_DIR/token_deployment"
+    cat <<EOL > "$SCRIPT_DIR/token_deployment/.env"
+PRIVATE_KEY="$PRIVATE_KEY"
+TOKEN_NAME="$TOKEN_NAME"
+TOKEN_SYMBOL="$TOKEN_SYMBOL"
+EOL
+
+    source "$SCRIPT_DIR/token_deployment/.env"
+    cat <<EOL > "$SCRIPT_DIR/foundry.toml"
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+
+[rpc_endpoints]
+rpc_url = "$RPC_URL"
+EOL
+    show "Updated files with your given data"
 }
 
-show "Checking if Foundry is already installed..." "progress"
-if check_foundry_installed; then
-    show "Foundry is already installed. Validating the PATH setup..."
-    validate_path
-else
-    install_foundry
-    add_foundry_to_path
-    validate_path
-fi
+generate_random_even_supply() {
+    local min=1000000
+    local max=1000000000000
+    local random_supply=$(( ( RANDOM << 15 | RANDOM ) % (max - min + 1) + min ))
 
-show "Foundry installation and PATH setup complete."
+    # Kalau ganjil, tambah 1 supaya genap
+    if (( random_supply % 2 != 0 )); then
+        random_supply=$((random_supply + 1))
+    fi
+
+    echo "$random_supply"
+}
+
+deploy_contract() {
+    echo -e "-----------------------------------"
+    source "$SCRIPT_DIR/token_deployment/.env"
+
+    local contract_number=$1
+
+    mkdir -p "$SCRIPT_DIR/src"
+
+    local SUPPLY=$(generate_random_even_supply)
+
+    cat <<EOL > "$SCRIPT_DIR/src/RandomToken.sol"
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+
+contract RandomToken is ERC20 {
+    constructor() ERC20("${TOKEN_NAME}", "${TOKEN_SYMBOL}") {
+        _mint(msg.sender, ${SUPPLY} * (10 ** decimals()));
+    }
+}
+EOL
+
+    show "Compiling contract $contract_number..." "progress"
+    forge build
+
+    if [[ $? -ne 0 ]]; then
+        show "Contract $contract_number compilation failed." "error"
+        exit 1
+    fi
+
+    show "Deploying ERC20 Token Contract $contract_number..." "progress"
+    DEPLOY_OUTPUT=$(forge create "$SCRIPT_DIR/src/RandomToken.sol:RandomToken" \
+        --rpc-url "$RPC_URL" \
+        --private-key "$PRIVATE_KEY" \
+        --broadcast)
+
+    if [[ $? -ne 0 ]]; then
+        show "Deployment of contract $contract_number failed." "error"
+        exit 1
+    fi
+
+    CONTRACT_ADDRESS=$(echo "$DEPLOY_OUTPUT" | grep -oP 'Deployed to: \K(0x[a-fA-F0-9]{40})')
+    show "Contract $contract_number deployed successfully at address: $CONTRACT_ADDRESS"
+}
+
+deploy_multiple_contracts() {
+    echo -e "-----------------------------------"
+    read -p "How many contracts do you want to deploy? " NUM_CONTRACTS
+    if [[ $NUM_CONTRACTS -lt 1 ]]; then
+        show "Invalid number of contracts." "error"
+        exit 1
+    fi
+
+    for (( i=1; i<=NUM_CONTRACTS; i++ ))
+    do
+        RANDOM_NAME=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 10)
+        TOKEN_NAME="Token_$RANDOM_NAME"
+
+        RANDOM_SYMBOL=$(head /dev/urandom | tr -dc A-Z | head -c 3)
+        TOKEN_SYMBOL="$RANDOM_SYMBOL"
+
+        echo "TOKEN_NAME=\"$TOKEN_NAME\"" > "$SCRIPT_DIR/token_deployment/.env"
+        echo "TOKEN_SYMBOL=\"$TOKEN_SYMBOL\"" >> "$SCRIPT_DIR/token_deployment/.env"
+        echo "PRIVATE_KEY=\"$PRIVATE_KEY\"" >> "$SCRIPT_DIR/token_deployment/.env"
+        echo "RPC_URL=\"$RPC_URL\"" >> "$SCRIPT_DIR/token_deployment/.env"
+
+        source "$SCRIPT_DIR/token_deployment/.env"
+
+        deploy_contract "$i"
+        echo -e "-----------------------------------"
+    done
+}
+
+menu() {
+    echo -e "\n${YELLOW}┌─────────────────────────────────────────────────────┐${NORMAL}"
+    echo -e "${YELLOW}│              Script Menu Options                    │${NORMAL}"
+    echo -e "${YELLOW}├─────────────────────────────────────────────────────┤${NORMAL}"
+    echo -e "${YELLOW}│              1) Install dependencies                │${NORMAL}"
+    echo -e "${YELLOW}│              2) Input required details              │${NORMAL}"
+    echo -e "${YELLOW}│              3) Deploy contract(s)                  │${NORMAL}"
+    echo -e "${YELLOW}│              4) Exit                                │${NORMAL}"
+    echo -e "${YELLOW}└─────────────────────────────────────────────────────┘${NORMAL}"
+
+    read -p "Enter your choice: " CHOICE
+
+    case $CHOICE in
+        1)
+            install_dependencies
+            ;;
+        2)
+            input_required_details
+            ;;
+        3)
+            deploy_multiple_contracts
+            ;;
+        4)
+            exit 0
+            ;;
+        *)
+            show "Invalid choice." "error"
+            ;;
+    esac
+}
+
+while true; do
+    menu
+done
