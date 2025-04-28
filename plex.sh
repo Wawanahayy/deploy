@@ -46,17 +46,40 @@ install_dependencies() {
     fi
 }
 
+generate_random_string() {
+    local length=$1
+    tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$length"
+}
+
+generate_random_supply() {
+    echo $(( (RANDOM % 1000 + 1) * 1000000000 ))  # Generates a random supply from 1 billion to 1 trillion
+}
+
 input_required_details() {
     echo -e "-----------------------------------"
     if [ -f "$SCRIPT_DIR/token_deployment/.env" ]; then
         rm "$SCRIPT_DIR/token_deployment/.env"
     fi
 
-    RANDOM_NAME=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 10)
-    TOKEN_NAME="Token_$RANDOM_NAME"
+    read -p "Do you want to generate random data (Token Name, Symbol, Supply)? (y/n): " RANDOM_INPUT
+    if [[ "$RANDOM_INPUT" == "y" ]]; then
+        TOKEN_NAME=$(generate_random_string 10)  # Generates random name with 10 characters
+        TOKEN_SYMBOL=$(generate_random_string 5)  # Generates random symbol with 5 characters
+        SUPPLY=$(generate_random_supply)          # Generates a random supply between 1 billion and 1 trillion
+        echo "Generated Token Name: $TOKEN_NAME"
+        echo "Generated Token Symbol: $TOKEN_SYMBOL"
+        echo "Generated Token Supply: $SUPPLY"
+    else
+        read -p "Enter Token Name: " TOKEN_NAME
+        read -p "Enter Token Symbol: " TOKEN_SYMBOL
+        read -p "Enter Token Supply (max: 1 quadrillion): " SUPPLY
 
-    RANDOM_SYMBOL=$(head /dev/urandom | tr -dc A-Z | head -c 3)
-    TOKEN_SYMBOL="$RANDOM_SYMBOL"
+        # Validasi supply token hingga 1 kuadriliun
+        while [[ ! "$SUPPLY" =~ ^[1-9][0-9]{0,15}$ ]] || [ "$SUPPLY" -gt 1000000000000000 ]; do
+            echo "Invalid supply. Please enter a valid number up to 1 quadrillion (1,000,000,000,000,000)."
+            read -p "Enter Token Supply (max: 1 quadrillion): " SUPPLY
+        done
+    fi
 
     read -p "Enter your Private Key: " PRIVATE_KEY
     read -p "Enter the network RPC URL: " RPC_URL
@@ -66,6 +89,7 @@ input_required_details() {
 PRIVATE_KEY="$PRIVATE_KEY"
 TOKEN_NAME="$TOKEN_NAME"
 TOKEN_SYMBOL="$TOKEN_SYMBOL"
+SUPPLY="$SUPPLY"
 EOL
 
     source "$SCRIPT_DIR/token_deployment/.env"
@@ -81,19 +105,6 @@ EOL
     show "Updated files with your given data"
 }
 
-generate_random_even_supply() {
-    local min=1000000
-    local max=1000000000000
-    local random_supply=$(( ( RANDOM << 15 | RANDOM ) % (max - min + 1) + min ))
-
-    # Kalau ganjil, tambah 1 supaya genap
-    if (( random_supply % 2 != 0 )); then
-        random_supply=$((random_supply + 1))
-    fi
-
-    echo "$random_supply"
-}
-
 deploy_contract() {
     echo -e "-----------------------------------"
     source "$SCRIPT_DIR/token_deployment/.env"
@@ -101,8 +112,6 @@ deploy_contract() {
     local contract_number=$1
 
     mkdir -p "$SCRIPT_DIR/src"
-
-    local SUPPLY=$(generate_random_even_supply)
 
     cat <<EOL > "$SCRIPT_DIR/src/RandomToken.sol"
 // SPDX-License-Identifier: MIT
@@ -150,19 +159,7 @@ deploy_multiple_contracts() {
 
     for (( i=1; i<=NUM_CONTRACTS; i++ ))
     do
-        RANDOM_NAME=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 10)
-        TOKEN_NAME="Token_$RANDOM_NAME"
-
-        RANDOM_SYMBOL=$(head /dev/urandom | tr -dc A-Z | head -c 3)
-        TOKEN_SYMBOL="$RANDOM_SYMBOL"
-
-        echo "TOKEN_NAME=\"$TOKEN_NAME\"" > "$SCRIPT_DIR/token_deployment/.env"
-        echo "TOKEN_SYMBOL=\"$TOKEN_SYMBOL\"" >> "$SCRIPT_DIR/token_deployment/.env"
-        echo "PRIVATE_KEY=\"$PRIVATE_KEY\"" >> "$SCRIPT_DIR/token_deployment/.env"
-        echo "RPC_URL=\"$RPC_URL\"" >> "$SCRIPT_DIR/token_deployment/.env"
-
-        source "$SCRIPT_DIR/token_deployment/.env"
-
+        input_required_details
         deploy_contract "$i"
         echo -e "-----------------------------------"
     done
@@ -174,8 +171,9 @@ menu() {
     echo -e "${YELLOW}├─────────────────────────────────────────────────────┤${NORMAL}"
     echo -e "${YELLOW}│              1) Install dependencies                │${NORMAL}"
     echo -e "${YELLOW}│              2) Input required details              │${NORMAL}"
-    echo -e "${YELLOW}│              3) Deploy contract(s)                  │${NORMAL}"
-    echo -e "${YELLOW}│              4) Exit                                │${NORMAL}"
+    echo -e "${YELLOW}│              3) Deploy contract(s) manually         │${NORMAL}"
+    echo -e "${YELLOW}│              4) Deploy contract(s) multiple         │${NORMAL}"
+    echo -e "${YELLOW}│              5) Exit                                │${NORMAL}"
     echo -e "${YELLOW}└─────────────────────────────────────────────────────┘${NORMAL}"
 
     read -p "Enter your choice: " CHOICE
@@ -188,9 +186,13 @@ menu() {
             input_required_details
             ;;
         3)
-            deploy_multiple_contracts
+            input_required_details
+            deploy_contract
             ;;
         4)
+            deploy_multiple_contracts
+            ;;
+        5)
             exit 0
             ;;
         *)
