@@ -61,12 +61,14 @@ input_required_details() {
 
     read -p "Enter your Private Key: " PRIVATE_KEY
     read -p "Enter the network RPC URL: " RPC_URL
+    read -p "Enter the delay time in seconds between transactions: " DELAY_TIME  # Input delay
 
     mkdir -p "$SCRIPT_DIR/token_deployment"
     cat <<EOL > "$SCRIPT_DIR/token_deployment/.env"
 PRIVATE_KEY="$PRIVATE_KEY"
 TOKEN_NAME="$TOKEN_NAME"
 TOKEN_SYMBOL="$TOKEN_SYMBOL"
+DELAY_TIME="$DELAY_TIME"  # Simpan delay di file .env
 EOL
 
     source "$SCRIPT_DIR/token_deployment/.env"
@@ -98,7 +100,7 @@ deploy_contract() {
 
     contract RandomToken is ERC20 {
         constructor() ERC20("${RANDOM_NAME}", "${RANDOM_SYMBOL}") {
-            _mint(msg.sender, 100000 * (10 ** decimals()));
+            _mint(msg.sender, 10000000000 * (10 ** decimals()));
         }
     }
 EOL
@@ -115,7 +117,7 @@ EOL
     DEPLOY_OUTPUT=$(forge create "$SCRIPT_DIR/src/RandomToken.sol:RandomToken" \
         --rpc-url "$RPC_URL" \
         --private-key "$PRIVATE_KEY" \
-        --broadcast)  # Added --broadcast to actually deploy the contract
+        --broadcast)
 
     if [[ $? -ne 0 ]]; then
         show "Deployment of contract $contract_number failed." "error"
@@ -124,6 +126,68 @@ EOL
 
     CONTRACT_ADDRESS=$(echo "$DEPLOY_OUTPUT" | grep -oP 'Deployed to: \K(0x[a-fA-F0-9]{40})')
     show "Contract $contract_number deployed successfully at address: $CONTRACT_ADDRESS"
+
+    # Tambahkan delay antara transaksi
+    echo "Waiting for $DELAY_TIME seconds before next transaction..."
+    sleep "$DELAY_TIME"  # Delay berdasarkan input pengguna
+}
+
+deploy_contract_manual() {
+    echo -e "-----------------------------------"
+    
+    # Gunakan .env yang sudah ada, tanpa perlu meminta input lagi
+    if [ -f "$SCRIPT_DIR/token_deployment/.env" ]; then
+        source "$SCRIPT_DIR/token_deployment/.env"
+    else
+        echo "Environment file (.env) not found. Please input the details first."
+        exit 1
+    fi
+    
+    read -p "Enter contract name (e.g., RandomToken): " CONTRACT_NAME
+    read -p "Enter the token name: " TOKEN_NAME
+    read -p "Enter the token symbol: " TOKEN_SYMBOL
+    read -p "Enter the initial supply (e.g., 100000): " INITIAL_SUPPLY
+
+    mkdir -p "$SCRIPT_DIR/src"
+
+    cat <<EOL > "$SCRIPT_DIR/src/$CONTRACT_NAME.sol"
+    // SPDX-License-Identifier: MIT
+    pragma solidity ^0.8.20;
+
+    import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+
+    contract $CONTRACT_NAME is ERC20 {
+        constructor() ERC20("$TOKEN_NAME", "$TOKEN_SYMBOL") {
+            _mint(msg.sender, $INITIAL_SUPPLY * (10 ** decimals()));
+        }
+    }
+EOL
+
+    show "Compiling $CONTRACT_NAME contract..." "progress"
+    forge build
+
+    if [[ $? -ne 0 ]]; then
+        show "$CONTRACT_NAME contract compilation failed." "error"
+        exit 1
+    fi
+
+    show "Deploying $CONTRACT_NAME contract..." "progress"
+    DEPLOY_OUTPUT=$(forge create "$SCRIPT_DIR/src/$CONTRACT_NAME.sol:$CONTRACT_NAME" \
+        --rpc-url "$RPC_URL" \
+        --private-key "$PRIVATE_KEY" \
+        --broadcast)
+
+    if [[ $? -ne 0 ]]; then
+        show "Deployment of $CONTRACT_NAME contract failed." "error"
+        exit 1
+    fi
+
+    CONTRACT_ADDRESS=$(echo "$DEPLOY_OUTPUT" | grep -oP 'Deployed to: \K(0x[a-fA-F0-9]{40})')
+    show "$CONTRACT_NAME contract deployed successfully at address: $CONTRACT_ADDRESS"
+
+    # Tambahkan delay antara transaksi
+    echo "Waiting for $DELAY_TIME seconds before next transaction..."
+    sleep "$DELAY_TIME"  # Delay berdasarkan input pengguna
 }
 
 deploy_multiple_contracts() {
@@ -160,8 +224,9 @@ menu() {
     echo -e "${YELLOW}├─────────────────────────────────────────────────────┤${NORMAL}"
     echo -e "${YELLOW}│              1) Install dependencies                │${NORMAL}"
     echo -e "${YELLOW}│              2) Input required details              │${NORMAL}"
-    echo -e "${YELLOW}│              3) Deploy contract(s)                  │${NORMAL}"
-    echo -e "${YELLOW}│              4) Exit                                │${NORMAL}"
+    echo -e "${YELLOW}│              3) Deploy contract(random)             │${NORMAL}"
+    echo -e "${YELLOW}│              4) Deploy contract (manual)            │${NORMAL}"
+    echo -e "${YELLOW}│              5) Exit                                │${NORMAL}"
     echo -e "${YELLOW}└─────────────────────────────────────────────────────┘${NORMAL}"
 
     read -p "Enter your choice: " CHOICE
@@ -177,6 +242,9 @@ menu() {
             deploy_multiple_contracts
             ;;
         4)
+            deploy_contract_manual
+            ;;
+        5)
             exit 0
             ;;
         *)
