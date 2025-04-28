@@ -98,7 +98,7 @@ deploy_contract() {
 
     contract RandomToken is ERC20 {
         constructor() ERC20("${RANDOM_NAME}", "${RANDOM_SYMBOL}") {
-            _mint(msg.sender, 100000000 * (10 ** decimals()));
+            _mint(msg.sender, 10000000000 * (10 ** decimals()));
         }
     }
 EOL
@@ -214,7 +214,7 @@ menu() {
     echo -e "${YELLOW}├─────────────────────────────────────────────────────┤${NORMAL}"
     echo -e "${YELLOW}│              1) Install dependencies                │${NORMAL}"
     echo -e "${YELLOW}│              2) Input required details              │${NORMAL}"
-    echo -e "${YELLOW}│              3) Deploy contract(s)                  │${NORMAL}"
+    echo -e "${YELLOW}│              3) Deploy contract(random)             │${NORMAL}"
     echo -e "${YELLOW}│              4) Deploy contract (manual)            │${NORMAL}"
     echo -e "${YELLOW}│              5) Exit                                │${NORMAL}"
     echo -e "${YELLOW}└─────────────────────────────────────────────────────┘${NORMAL}"
