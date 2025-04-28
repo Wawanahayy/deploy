@@ -1,7 +1,5 @@
 #!/bin/bash
 
-curl -s https://raw.githubusercontent.com/Wawanahayy/JawaPride-all.sh/refs/heads/main/display.sh | bash
-sleep 3
 
 BOLD=$(tput bold)
 NORMAL=$(tput sgr0)
@@ -219,6 +217,8 @@ deploy_multiple_contracts() {
 }
 
 menu() {
+curl -s https://raw.githubusercontent.com/Wawanahayy/JawaPride-all.sh/refs/heads/main/display.sh | bash
+sleep 3
     echo -e "\n${YELLOW}┌─────────────────────────────────────────────────────┐${NORMAL}"
     echo -e "${YELLOW}│              Script Menu Options                    │${NORMAL}"
     echo -e "${YELLOW}├─────────────────────────────────────────────────────┤${NORMAL}"
