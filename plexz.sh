@@ -91,16 +91,18 @@ deploy_contract() {
     mkdir -p "$SCRIPT_DIR/src"
 
     cat <<EOL > "$SCRIPT_DIR/src/RandomToken.sol"
-    // SPDX-License-Identifier: MIT
-    pragma solidity ^0.8.20;
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
 
-    import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
-    contract RandomToken is ERC20 {
-        constructor() ERC20("${RANDOM_NAME}", "${RANDOM_SYMBOL}") {
-            _mint(msg.sender, 100000 * (10 ** decimals()));
-        }
+contract RandomToken is ERC20 {
+    constructor() ERC20("${RANDOM_NAME}", "${RANDOM_SYMBOL}") {
+        uint256 maxSupply = 10 * 10**15; // Maksimal 10 Quadrillion
+        uint256 randomSupply = uint256(keccak256(abi.encodePacked(block.timestamp, block.difficulty, msg.sender))) % maxSupply;
+        _mint(msg.sender, randomSupply);
     }
+}
 EOL
 
     show "Compiling contract $contract_number..." "progress"
