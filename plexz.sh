@@ -98,7 +98,7 @@ deploy_contract() {
 
     contract RandomToken is ERC20 {
         constructor() ERC20("${RANDOM_NAME}", "${RANDOM_SYMBOL}") {
-            _mint(msg.sender, 100000 * (10 ** decimals()));
+            _mint(msg.sender, 10000000000 * (10 ** decimals()));
         }
     }
 EOL
