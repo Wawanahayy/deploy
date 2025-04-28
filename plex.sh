@@ -1,13 +1,12 @@
 #!/bin/bash
 
-curl -s https://raw.githubusercontent.com/Wawanahayy/JawaPride-all.sh/refs/heads/main/display.sh | bash
-sleep 3
-
+# Menyimpan warna
 BOLD=$(tput bold)
 NORMAL=$(tput sgr0)
 PINK='\033[1;35m'
 YELLOW='\033[1;33m'
 
+# Fungsi untuk menampilkan pesan
 show() {
     case $2 in
         "error")
@@ -22,9 +21,11 @@ show() {
     esac
 }
 
+# Menyimpan direktori skrip
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR" || exit
 
+# Fungsi untuk install dependencies
 install_dependencies() {
     CONTRACT_NAME="RandomToken"
 
@@ -46,40 +47,18 @@ install_dependencies() {
     fi
 }
 
-generate_random_string() {
-    local length=$1
-    tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$length"
-}
-
-generate_random_supply() {
-    echo $(( (RANDOM % 1000 + 1) * 1000000000 ))  # Generates a random supply from 1 billion to 1 trillion
-}
-
+# Fungsi untuk memasukkan detail yang diperlukan
 input_required_details() {
     echo -e "-----------------------------------"
     if [ -f "$SCRIPT_DIR/token_deployment/.env" ]; then
         rm "$SCRIPT_DIR/token_deployment/.env"
     fi
 
-    read -p "Do you want to generate random data (Token Name, Symbol, Supply)? (y/n): " RANDOM_INPUT
-    if [[ "$RANDOM_INPUT" == "y" ]]; then
-        TOKEN_NAME=$(generate_random_string 10)  # Generates random name with 10 characters
-        TOKEN_SYMBOL=$(generate_random_string 5)  # Generates random symbol with 5 characters
-        SUPPLY=$(generate_random_supply)          # Generates a random supply between 1 billion and 1 trillion
-        echo "Generated Token Name: $TOKEN_NAME"
-        echo "Generated Token Symbol: $TOKEN_SYMBOL"
-        echo "Generated Token Supply: $SUPPLY"
-    else
-        read -p "Enter Token Name: " TOKEN_NAME
-        read -p "Enter Token Symbol: " TOKEN_SYMBOL
-        read -p "Enter Token Supply (max: 1 quadrillion): " SUPPLY
+    RANDOM_NAME=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 10)
+    TOKEN_NAME="Token_$RANDOM_NAME"
 
-        # Validasi supply token hingga 1 kuadriliun
-        while [[ ! "$SUPPLY" =~ ^[1-9][0-9]{0,15}$ ]] || [ "$SUPPLY" -gt 1000000000000000 ]; do
-            echo "Invalid supply. Please enter a valid number up to 1 quadrillion (1,000,000,000,000,000)."
-            read -p "Enter Token Supply (max: 1 quadrillion): " SUPPLY
-        done
-    fi
+    RANDOM_SYMBOL=$(head /dev/urandom | tr -dc A-Z | head -c 3)
+    TOKEN_SYMBOL="$RANDOM_SYMBOL"
 
     read -p "Enter your Private Key: " PRIVATE_KEY
     read -p "Enter the network RPC URL: " RPC_URL
@@ -89,7 +68,6 @@ input_required_details() {
 PRIVATE_KEY="$PRIVATE_KEY"
 TOKEN_NAME="$TOKEN_NAME"
 TOKEN_SYMBOL="$TOKEN_SYMBOL"
-SUPPLY="$SUPPLY"
 EOL
 
     source "$SCRIPT_DIR/token_deployment/.env"
@@ -105,13 +83,42 @@ EOL
     show "Updated files with your given data"
 }
 
-deploy_contract() {
+# Fungsi untuk menghasilkan supply token secara acak
+generate_random_even_supply() {
+    local min=10
+    local max=1000000000000000000
+    local random_supply=$(( ( RANDOM << 15 | RANDOM ) % (max - min + 1) + min ))
+
+    # Kalau ganjil, tambah 1 supaya genap
+    if (( random_supply % 2 != 0 )); then
+        random_supply=$((random_supply + 1))
+    fi
+
+    echo "$random_supply"
+}
+
+# Fungsi untuk mendeklarasikan kontrak secara manual
+deploy_contract_manually() {
     echo -e "-----------------------------------"
     source "$SCRIPT_DIR/token_deployment/.env"
 
-    local contract_number=$1
+    local CONTRACT_NAME
+    local CONTRACT_SYMBOL
+    local CONTRACT_SUPPLY
+    local CONTRACT_NUMBER=1
 
-    mkdir -p "$SCRIPT_DIR/src"
+    read -p "Do you want to generate random data (Token Name, Symbol, Supply)? (y/n): " USE_RANDOM
+    if [ "$USE_RANDOM" == "y" ]; then
+        CONTRACT_NAME=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 10)
+        CONTRACT_SYMBOL=$(head /dev/urandom | tr -dc A-Z | head -c 3)
+        CONTRACT_SUPPLY=$(generate_random_even_supply)
+    else
+        read -p "Enter Token Name: " CONTRACT_NAME
+        read -p "Enter Token Symbol: " CONTRACT_SYMBOL
+        read -p "Enter Token Supply (10, 100, or 1000): " CONTRACT_SUPPLY
+    fi
+
+    echo "Deploying $CONTRACT_NAME ($CONTRACT_SYMBOL) with supply of $CONTRACT_SUPPLY tokens..."
 
     cat <<EOL > "$SCRIPT_DIR/src/RandomToken.sol"
 // SPDX-License-Identifier: MIT
@@ -120,35 +127,36 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 contract RandomToken is ERC20 {
-    constructor() ERC20("${TOKEN_NAME}", "${TOKEN_SYMBOL}") {
-        _mint(msg.sender, ${SUPPLY} * (10 ** decimals()));
+    constructor() ERC20("$CONTRACT_NAME", "$CONTRACT_SYMBOL") {
+        _mint(msg.sender, $CONTRACT_SUPPLY * (10 ** decimals()));
     }
 }
 EOL
 
-    show "Compiling contract $contract_number..." "progress"
+    show "Compiling contract $CONTRACT_NUMBER..." "progress"
     forge build
 
     if [[ $? -ne 0 ]]; then
-        show "Contract $contract_number compilation failed." "error"
+        show "Contract $CONTRACT_NUMBER compilation failed." "error"
         exit 1
     fi
 
-    show "Deploying ERC20 Token Contract $contract_number..." "progress"
+    show "Deploying ERC20 Token Contract $CONTRACT_NUMBER..." "progress"
     DEPLOY_OUTPUT=$(forge create "$SCRIPT_DIR/src/RandomToken.sol:RandomToken" \
         --rpc-url "$RPC_URL" \
         --private-key "$PRIVATE_KEY" \
         --broadcast)
 
     if [[ $? -ne 0 ]]; then
-        show "Deployment of contract $contract_number failed." "error"
+        show "Deployment of contract $CONTRACT_NUMBER failed." "error"
         exit 1
     fi
 
     CONTRACT_ADDRESS=$(echo "$DEPLOY_OUTPUT" | grep -oP 'Deployed to: \K(0x[a-fA-F0-9]{40})')
-    show "Contract $contract_number deployed successfully at address: $CONTRACT_ADDRESS"
+    show "Contract $CONTRACT_NUMBER deployed successfully at address: $CONTRACT_ADDRESS"
 }
 
+# Fungsi untuk deploy banyak kontrak
 deploy_multiple_contracts() {
     echo -e "-----------------------------------"
     read -p "How many contracts do you want to deploy? " NUM_CONTRACTS
@@ -159,12 +167,12 @@ deploy_multiple_contracts() {
 
     for (( i=1; i<=NUM_CONTRACTS; i++ ))
     do
-        input_required_details
-        deploy_contract "$i"
+        deploy_contract_manually
         echo -e "-----------------------------------"
     done
 }
 
+# Fungsi untuk menampilkan menu utama
 menu() {
     echo -e "\n${YELLOW}┌─────────────────────────────────────────────────────┐${NORMAL}"
     echo -e "${YELLOW}│              Script Menu Options                    │${NORMAL}"
@@ -186,8 +194,7 @@ menu() {
             input_required_details
             ;;
         3)
-            input_required_details
-            deploy_contract
+            deploy_contract_manually
             ;;
         4)
             deploy_multiple_contracts
@@ -201,6 +208,7 @@ menu() {
     esac
 }
 
+# Loop untuk menjalankan menu
 while true; do
     menu
 done
