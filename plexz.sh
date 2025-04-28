@@ -61,12 +61,14 @@ input_required_details() {
 
     read -p "Enter your Private Key: " PRIVATE_KEY
     read -p "Enter the network RPC URL: " RPC_URL
+    read -p "Enter the delay time in seconds between transactions: " DELAY_TIME  # Input delay
 
     mkdir -p "$SCRIPT_DIR/token_deployment"
     cat <<EOL > "$SCRIPT_DIR/token_deployment/.env"
 PRIVATE_KEY="$PRIVATE_KEY"
 TOKEN_NAME="$TOKEN_NAME"
 TOKEN_SYMBOL="$TOKEN_SYMBOL"
+DELAY_TIME="$DELAY_TIME"  # Simpan delay di file .env
 EOL
 
     source "$SCRIPT_DIR/token_deployment/.env"
@@ -115,7 +117,7 @@ EOL
     DEPLOY_OUTPUT=$(forge create "$SCRIPT_DIR/src/RandomToken.sol:RandomToken" \
         --rpc-url "$RPC_URL" \
         --private-key "$PRIVATE_KEY" \
-        --broadcast)  # Added --broadcast to actually deploy the contract
+        --broadcast)
 
     if [[ $? -ne 0 ]]; then
         show "Deployment of contract $contract_number failed." "error"
@@ -124,6 +126,10 @@ EOL
 
     CONTRACT_ADDRESS=$(echo "$DEPLOY_OUTPUT" | grep -oP 'Deployed to: \K(0x[a-fA-F0-9]{40})')
     show "Contract $contract_number deployed successfully at address: $CONTRACT_ADDRESS"
+
+    # Tambahkan delay antara transaksi
+    echo "Waiting for $DELAY_TIME seconds before next transaction..."
+    sleep "$DELAY_TIME"  # Delay berdasarkan input pengguna
 }
 
 deploy_contract_manual() {
@@ -178,6 +184,10 @@ EOL
 
     CONTRACT_ADDRESS=$(echo "$DEPLOY_OUTPUT" | grep -oP 'Deployed to: \K(0x[a-fA-F0-9]{40})')
     show "$CONTRACT_NAME contract deployed successfully at address: $CONTRACT_ADDRESS"
+
+    # Tambahkan delay antara transaksi
+    echo "Waiting for $DELAY_TIME seconds before next transaction..."
+    sleep "$DELAY_TIME"  # Delay berdasarkan input pengguna
 }
 
 deploy_multiple_contracts() {
