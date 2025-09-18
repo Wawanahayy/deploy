@@ -33,22 +33,26 @@ ensure_git() {
   fi
 }
 
+# ==== RECOMMENDED: Foundry via official installer (no plex.sh) ====
 ensure_foundry() {
-  if ! command -v forge >/dev/null 2>&1; then
-    show "Foundry not found. Installing…" progress
-    # Try your installer first
-    if command -v wget >/dev/null 2>&1; then
-      set +e
-      source <(wget -qO- https://raw.githubusercontent.com/Wawanahayy/deploy/refs/heads/main/plex.sh) || true
-      set -e
-    fi
-    # Official installer fallback
-    if ! command -v forge >/dev/null 2>&1; then
-      curl -L https://foundry.paradigm.xyz | bash
-      export PATH="$HOME/.foundry/bin:$PATH"
-      foundryup
-    fi
+  if command -v forge >/dev/null 2>&1; then
+    show "Foundry sudah terpasang: $(forge --version | head -n1)"
+    return
   fi
+
+  show "Installing Foundry (resmi) …" progress
+  curl -L https://foundry.paradigm.xyz | bash
+
+  # Tambahkan Foundry ke PATH untuk sesi ini
+  export PATH="$HOME/.foundry/bin:$PATH"
+
+  # Inisialisasi toolchain
+  if [ -x "$HOME/.foundry/bin/foundryup" ]; then
+    "$HOME/.foundry/bin/foundryup"
+  else
+    foundryup
+  fi
+
   show "Foundry: $(forge --version | head -n1)"
 }
 
@@ -110,8 +114,7 @@ mk_contract_file() {
   local CONTRACT_NAME="$1"   # e.g., RandomToken
   local TOKEN_NAME="$2"      # e.g., Token_ABC
   local TOKEN_SYMBOL="$3"    # e.g., ABC
-  local SUPPLY_WEI="$4"      # e.g., 10000000000 * 10**18 (already multiplied) OR integer count to multiply
-
+  local SUPPLY_WEI="$4"      # e.g., 10000000000 * 10**18
   mkdir -p src
   cat > "src/${CONTRACT_NAME}.sol" <<SOL
 // SPDX-License-Identifier: MIT
@@ -136,11 +139,9 @@ deploy_one() {
   local CONTRACT_NAME="$1"
   local TOKEN_NAME="$2"
   local TOKEN_SYMBOL="$3"
-  local SUPPLY_TOKENS="$4"   # plain token units, will multiply by 10**decimals
-  local SUPPLY_WEI
-  # Multiply in bash (no bigints), so pass expression to solidity: (SUPPLY * 10 ** decimals())
-  # Simpler: do in solidity using decimals(), but we already generate code. Keep it simple:
-  SUPPLY_WEI="(${SUPPLY_TOKENS} * (10 ** decimals()))"
+  local SUPPLY_TOKENS="$4"   # plain token units, multiplied by 10**decimals in Solidity
+  local SUPPLY_WEI="(${SUPPLY_TOKENS} * (10 ** decimals()))"
+
   mk_contract_file "$CONTRACT_NAME" "$TOKEN_NAME" "$TOKEN_SYMBOL" "$SUPPLY_WEI"
   forge_build
 
@@ -159,7 +160,6 @@ deploy_one() {
   fi
 
   echo "$DEPLOY_OUTPUT" | sed -n '1,120p'
-  # Parse address
   local CONTRACT_ADDRESS
   CONTRACT_ADDRESS=$(awk '/Deployed to:/ {print $3}' <<< "$DEPLOY_OUTPUT" | tail -n1)
 
@@ -197,7 +197,6 @@ deploy_contract_random() {
   local RANDOM_NAME="Token_$(rand_alpha 10)"
   local RANDOM_SYMBOL="$(rand_caps3)"
   local SUPPLY="10000000000" # 10B tokens
-
   deploy_one "$CONTRACT_NAME" "$RANDOM_NAME" "$RANDOM_SYMBOL" "$SUPPLY"
 }
 
@@ -212,7 +211,6 @@ deploy_contract_manual() {
   : "${TOKEN_NAME:?}"
   : "${TOKEN_SYMBOL:?}"
   : "${INITIAL_SUPPLY:?}"
-
   deploy_one "$CONTRACT_NAME" "$TOKEN_NAME" "$TOKEN_SYMBOL" "$INITIAL_SUPPLY"
 }
 
