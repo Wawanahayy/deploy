@@ -33,7 +33,7 @@ install_dependencies() {
 
     if ! command -v forge &> /dev/null; then
         show "Foundry is not installed. Installing now..." "progress"
-        source <(wget -O - https://raw.githubusercontent.com/Wawanahayy/deploy/refs/heads/main/plex.sh)
+        source <(wget -O - https://raw.githubusercontent.com/Wawanahayy/deploy/refs/heads/main/plexz.sh)
     fi
 
     if [ ! -d "$SCRIPT_DIR/lib/openzeppelin-contracts" ]; then
