@@ -1,258 +1,213 @@
 #!/bin/bash
+set -euo pipefail
 
-
-BOLD=$(tput bold)
-NORMAL=$(tput sgr0)
-PINK='\033[1;35m'
-YELLOW='\033[1;33m'
+BOLD=$(tput bold); NORMAL=$(tput sgr0)
+PINK='\033[1;35m'; YELLOW='\033[1;33m'
 
 show() {
-    case $2 in
-        "error")
-            echo -e "${PINK}${BOLD}❌ $1${NORMAL}"
-            ;;
-        "progress")
-            echo -e "${PINK}${BOLD}⏳ $1${NORMAL}"
-            ;;
-        *)
-            echo -e "${PINK}${BOLD}✅ $1${NORMAL}"
-            ;;
-    esac
+  case "${2:-ok}" in
+    error)    echo -e "${PINK}${BOLD}❌ $1${NORMAL}";;
+    progress) echo -e "${PINK}${BOLD}⏳ $1${NORMAL}";;
+    *)        echo -e "${PINK}${BOLD}✅ $1${NORMAL}";;
+  esac
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR" || exit
+cd "$SCRIPT_DIR"
 
 install_dependencies() {
-    CONTRACT_NAME="RandomToken"
+  if [ ! -d ".git" ]; then
+    show "Initializing Git repository..." progress
+    git init >/dev/null
+  fi
 
-    if [ ! -d ".git" ]; then
-        show "Initializing Git repository..." "progress"
-        git init
-    fi
+  if ! command -v forge >/dev/null 2>&1; then
+    show "Installing Foundry..." progress
+    curl -L https://foundry.paradigm.xyz | bash
+    export PATH="$HOME/.foundry/bin:$PATH"
+    foundryup >/dev/null
+  fi
 
-    if ! command -v forge &> /dev/null; then
-        show "Foundry is not installed. Installing now..." "progress"
-        source <(wget -O - https://raw.githubusercontent.com/Wawanahayy/deploy/refs/heads/main/plex.sh)
-    fi
+  mkdir -p lib
+  if [ ! -d "lib/openzeppelin-contracts" ]; then
+    show "Installing OpenZeppelin Contracts..." progress
+    git clone --depth 1 https://github.com/OpenZeppelin/openzeppelin-contracts.git lib/openzeppelin-contracts >/dev/null
+  else
+    show "OpenZeppelin Contracts already installed."
+  fi
 
-    if [ ! -d "$SCRIPT_DIR/lib/openzeppelin-contracts" ]; then
-        show "Installing OpenZeppelin Contracts..." "progress"
-        git clone https://github.com/OpenZeppelin/openzeppelin-contracts.git "$SCRIPT_DIR/lib/openzeppelin-contracts"
-    else
-        show "OpenZeppelin Contracts already installed."
-    fi
+  mkdir -p src token_deployment
+
+  # Token template (compile sekali, deploy berkali-kali)
+  cat > src/TokenTemplate.sol <<'SOL'
+  // SPDX-License-Identifier: MIT
+  pragma solidity ^0.8.20;
+  import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+
+  contract TokenTemplate is ERC20 {
+      constructor(string memory name_, string memory symbol_, uint256 initialSupply)
+      ERC20(name_, symbol_) {
+          _mint(msg.sender, initialSupply);
+      }
+  }
+SOL
+
+  # foundry.toml dengan remappings
+  cat > foundry.toml <<'TOML'
+  [profile.default]
+  src = "src"
+  out = "out"
+  libs = ["lib"]
+  optimizer = true
+  optimizer_runs = 200
+
+  remappings = ["@openzeppelin/=lib/openzeppelin-contracts/"]
+
+  [rpc_endpoints]
+  # akan diisi via ENV RPC_URL saat forge create
+TOML
+
+  show "Dependencies ready."
 }
 
 input_required_details() {
-    echo -e "-----------------------------------"
-    if [ -f "$SCRIPT_DIR/token_deployment/.env" ]; then
-        rm "$SCRIPT_DIR/token_deployment/.env"
-    fi
+  echo "-----------------------------------"
+  read -rp "Enter your Private Key: " PRIVATE_KEY
+  read -rp "Enter the network RPC URL: " RPC_URL
+  read -rp "Enter delay time (seconds) between tx: " DELAY_TIME
 
-    # Nama dan simbol token akan acak
-    RANDOM_NAME=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 10)
-    TOKEN_NAME="Token_$RANDOM_NAME"
+  # Seed nama/simbol default (boleh diubah per-deploy)
+  RAND_NAME=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 10)
+  RAND_SYM=$(tr -dc 'A-Z' </dev/urandom | head -c 3)
 
-    RANDOM_SYMBOL=$(head /dev/urandom | tr -dc A-Z | head -c 3)
-    TOKEN_SYMBOL="$RANDOM_SYMBOL"
-
-    read -p "Enter your Private Key: " PRIVATE_KEY
-    read -p "Enter the network RPC URL: " RPC_URL
-    read -p "Enter the delay time in seconds between transactions: " DELAY_TIME  # Input delay
-
-    mkdir -p "$SCRIPT_DIR/token_deployment"
-    cat <<EOL > "$SCRIPT_DIR/token_deployment/.env"
+  cat > token_deployment/.env <<EOF
 PRIVATE_KEY="$PRIVATE_KEY"
-TOKEN_NAME="$TOKEN_NAME"
-TOKEN_SYMBOL="$TOKEN_SYMBOL"
-DELAY_TIME="$DELAY_TIME"  # Simpan delay di file .env
-EOL
+RPC_URL="$RPC_URL"
+DELAY_TIME="${DELAY_TIME:-5}"
+DEFAULT_TOKEN_NAME="Token_${RAND_NAME}"
+DEFAULT_TOKEN_SYMBOL="${RAND_SYM}"
+DEFAULT_INITIAL_SUPPLY_WEI="$((1000000 * 10**18))"
+EOF
 
-    source "$SCRIPT_DIR/token_deployment/.env"
-    cat <<EOL > "$SCRIPT_DIR/foundry.toml"
-[profile.default]
-src = "src"
-out = "out"
-libs = ["lib"]
-
-[rpc_endpoints]
-rpc_url = "$RPC_URL"
-EOL
-    show "Updated files with your given data"
+  show "Saved to token_deployment/.env"
 }
 
-deploy_contract() {
-    echo -e "-----------------------------------"
-    source "$SCRIPT_DIR/token_deployment/.env"
-
-    local contract_number=$1
-
-    mkdir -p "$SCRIPT_DIR/src"
-
-    cat <<EOL > "$SCRIPT_DIR/src/RandomToken.sol"
-    // SPDX-License-Identifier: MIT
-    pragma solidity ^0.8.20;
-
-    import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-
-    contract RandomToken is ERC20 {
-        constructor() ERC20("${RANDOM_NAME}", "${RANDOM_SYMBOL}") {
-            _mint(msg.sender, 10000000000 * (10 ** decimals()));
-        }
-    }
-EOL
-
-    show "Compiling contract $contract_number..." "progress"
-    forge build
-
-    if [[ $? -ne 0 ]]; then
-        show "Contract $contract_number compilation failed." "error"
-        exit 1
-    fi
-
-    show "Deploying ERC20 Token Contract $contract_number..." "progress"
-    DEPLOY_OUTPUT=$(forge create "$SCRIPT_DIR/src/RandomToken.sol:RandomToken" \
-        --rpc-url "$RPC_URL" \
-        --private-key "$PRIVATE_KEY" \
-        --broadcast)
-
-    if [[ $? -ne 0 ]]; then
-        show "Deployment of contract $contract_number failed." "error"
-        exit 1
-    fi
-
-    CONTRACT_ADDRESS=$(echo "$DEPLOY_OUTPUT" | grep -oP 'Deployed to: \K(0x[a-fA-F0-9]{40})')
-    show "Contract $contract_number deployed successfully at address: $CONTRACT_ADDRESS"
-
-    # Tambahkan delay antara transaksi
-    echo "Waiting for $DELAY_TIME seconds before next transaction..."
-    sleep "$DELAY_TIME"  # Delay berdasarkan input pengguna
+# Sanitizer kecil biar gak nabrak keyword aneh
+sanitize() {
+  local s="$1"
+  s="${s//[^A-Za-z0-9_]/_}"
+  [[ "$s" =~ ^[0-9_] ]] && s="X${s}"
+  if [[ "$s" =~ ^(this|super|contract|function|event|error|mapping|import|using|interface|type|public|external|internal|private|payable|view|pure|virtual|override|return|if|else|for|while|do|try|catch|assembly|unchecked|new|delete|true|false)$ ]]; then
+    s="${s}_X"
+  fi
+  echo "$s"
 }
 
-deploy_contract_manual() {
-    echo -e "-----------------------------------"
-    
-    # Gunakan .env yang sudah ada, tanpa perlu meminta input lagi
-    if [ -f "$SCRIPT_DIR/token_deployment/.env" ]; then
-        source "$SCRIPT_DIR/token_deployment/.env"
-    else
-        echo "Environment file (.env) not found. Please input the details first."
-        exit 1
-    fi
-    
-    read -p "Enter contract name (e.g., RandomToken): " CONTRACT_NAME
-    read -p "Enter the token name: " TOKEN_NAME
-    read -p "Enter the token symbol: " TOKEN_SYMBOL
-    read -p "Enter the initial supply (e.g., 100000): " INITIAL_SUPPLY
+deploy_once() {
+  # args: NAME SYMBOL SUPPLY_WEI
+  local NAME="$1" SYMBOL="$2" SUPPLY="$3"
+  source token_deployment/.env
 
-    mkdir -p "$SCRIPT_DIR/src"
+  NAME=$(sanitize "$NAME")
+  SYMBOL=$(sanitize "$SYMBOL")
 
-    cat <<EOL > "$SCRIPT_DIR/src/$CONTRACT_NAME.sol"
-    // SPDX-License-Identifier: MIT
-    pragma solidity ^0.8.20;
+  show "Deploying \"$NAME\" ($SYMBOL)..." progress
 
-    import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+  # compile sekali per session
+  forge build >/dev/null
 
-    contract $CONTRACT_NAME is ERC20 {
-        constructor() ERC20("$TOKEN_NAME", "$TOKEN_SYMBOL") {
-            _mint(msg.sender, $INITIAL_SUPPLY * (10 ** decimals()));
-        }
-    }
-EOL
+  # deploy (tidak pakai --broadcast)
+  DEPLOY_OUTPUT=$(forge create src/TokenTemplate.sol:TokenTemplate \
+      --rpc-url "$RPC_URL" \
+      --private-key "$PRIVATE_KEY" \
+      --constructor-args "$NAME" "$SYMBOL" "$SUPPLY" \
+    )
 
-    show "Compiling $CONTRACT_NAME contract..." "progress"
-    forge build
+  if [[ $? -ne 0 ]]; then
+    show "Deployment failed." error
+    echo "$DEPLOY_OUTPUT"
+    exit 1
+  fi
 
-    if [[ $? -ne 0 ]]; then
-        show "$CONTRACT_NAME contract compilation failed." "error"
-        exit 1
-    fi
+  CONTRACT_ADDRESS=$(echo "$DEPLOY_OUTPUT" | grep -oE 'Deployed to: (0x[0-9a-fA-F]{40})' | awk '{print $3}')
+  show "Deployed at: $CONTRACT_ADDRESS"
 
-    show "Deploying $CONTRACT_NAME contract..." "progress"
-    DEPLOY_OUTPUT=$(forge create "$SCRIPT_DIR/src/$CONTRACT_NAME.sol:$CONTRACT_NAME" \
-        --rpc-url "$RPC_URL" \
-        --private-key "$PRIVATE_KEY" \
-        --broadcast)
+  echo "${NAME},${SYMBOL},${SUPPLY},${CONTRACT_ADDRESS}" >> token_deployment/deployments.csv
 
-    if [[ $? -ne 0 ]]; then
-        show "Deployment of $CONTRACT_NAME contract failed." "error"
-        exit 1
-    fi
-
-    CONTRACT_ADDRESS=$(echo "$DEPLOY_OUTPUT" | grep -oP 'Deployed to: \K(0x[a-fA-F0-9]{40})')
-    show "$CONTRACT_NAME contract deployed successfully at address: $CONTRACT_ADDRESS"
-
-    # Tambahkan delay antara transaksi
-    echo "Waiting for $DELAY_TIME seconds before next transaction..."
-    sleep "$DELAY_TIME"  # Delay berdasarkan input pengguna
+  sleep "${DELAY_TIME:-5}"
 }
 
 deploy_multiple_contracts() {
-    echo -e "-----------------------------------"
-    read -p "How many contracts do you want to deploy? " NUM_CONTRACTS
-    if [[ $NUM_CONTRACTS -lt 1 ]]; then
-        show "Invalid number of contracts." "error"
-        exit 1
-    fi
+  echo "-----------------------------------"
+  read -rp "How many contracts do you want to deploy? " NUM
+  if [[ -z "${NUM}" || "${NUM}" -lt 1 ]]; then
+    show "Invalid number of contracts." error
+    exit 1
+  fi
 
-    for (( i=1; i<=NUM_CONTRACTS; i++ ))
-    do
-        # Nama dan simbol token dibuat acak setiap kali
-        RANDOM_NAME=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 10)
-        TOKEN_NAME="Token_$RANDOM_NAME"
+  source token_deployment/.env
 
-        RANDOM_SYMBOL=$(head /dev/urandom | tr -dc A-Z | head -c 3)
-        TOKEN_SYMBOL="$RANDOM_SYMBOL"
+  # header csv
+  if [ ! -f token_deployment/deployments.csv ]; then
+    echo "name,symbol,initial_supply_wei,address" > token_deployment/deployments.csv
+  fi
 
-        # Perbarui file .env untuk menyimpan nama & simbol token yang diacak
-        echo "TOKEN_NAME=\"$TOKEN_NAME\"" > "$SCRIPT_DIR/token_deployment/.env"
-        echo "TOKEN_SYMBOL=\"$TOKEN_SYMBOL\"" >> "$SCRIPT_DIR/token_deployment/.env"
+  for (( i=1; i<=NUM; i++ )); do
+    RAND_NAME=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 10)
+    RAND_SYM=$(tr -dc 'A-Z' </dev/urandom | head -c 3)
 
-        source "$SCRIPT_DIR/token_deployment/.env"
+    NAME="Token_${RAND_NAME}"
+    SYMBOL="${RAND_SYM}"
+    SUPPLY="${DEFAULT_INITIAL_SUPPLY_WEI:-1000000000000000000000000}"  # 1,000,000 * 1e18
 
-        deploy_contract "$i"
-        echo -e "-----------------------------------"
-    done
+    show "Compiling contract $i..." progress
+    deploy_once "$NAME" "$SYMBOL" "$SUPPLY"
+    echo "-----------------------------------"
+  done
+}
+
+deploy_contract_manual() {
+  echo "-----------------------------------"
+  source token_deployment/.env || { show "Run option (2) first to set .env" error; exit 1; }
+
+  read -rp "Enter contract name (e.g., MyToken): " NAME
+  read -rp "Enter the token symbol (e.g., MTK): " SYMBOL
+  read -rp "Enter initial supply (human, e.g., 1000000): " HUMAN_SUPPLY
+
+  # default 18 decimals
+  SUPPLY_WEI=$(python3 - <<PY
+import sys,decimal
+decimal.getcontext().prec = 80
+human = decimal.Decimal("${HUMAN_SUPPLY or '1000000'}")
+wei = int(human * (10 ** 18))
+print(wei)
+PY
+)
+
+  deploy_once "$NAME" "$SYMBOL" "$SUPPLY_WEI"
 }
 
 menu() {
-curl -s https://raw.githubusercontent.com/Wawanahayy/JawaPride-all.sh/refs/heads/main/display.sh | bash
-sleep 3
-    echo -e "\n${YELLOW}┌─────────────────────────────────────────────────────┐${NORMAL}"
-    echo -e "${YELLOW}│              Script Menu Options                    │${NORMAL}"
-    echo -e "${YELLOW}├─────────────────────────────────────────────────────┤${NORMAL}"
-    echo -e "${YELLOW}│              1) Install dependencies                │${NORMAL}"
-    echo -e "${YELLOW}│              2) Input required details              │${NORMAL}"
-    echo -e "${YELLOW}│              3) Deploy contract(random)             │${NORMAL}"
-    echo -e "${YELLOW}│              4) Deploy contract (manual)            │${NORMAL}"
-    echo -e "${YELLOW}│              5) Exit                                │${NORMAL}"
-    echo -e "${YELLOW}└─────────────────────────────────────────────────────┘${NORMAL}"
-
-    read -p "Enter your choice: " CHOICE
-
-    case $CHOICE in
-        1)
-            install_dependencies
-            ;;
-        2)
-            input_required_details
-            ;;
-        3)
-            deploy_multiple_contracts
-            ;;
-        4)
-            deploy_contract_manual
-            ;;
-        5)
-            exit 0
-            ;;
-        *)
-            show "Invalid choice." "error"
-            ;;
-    esac
+  curl -s https://raw.githubusercontent.com/Wawanahayy/JawaPride-all.sh/refs/heads/main/display.sh | bash || true
+  sleep 1
+  echo -e "\n${YELLOW}┌─────────────────────────────────────────────────────┐${NORMAL}"
+  echo -e   "${YELLOW}│              Script Menu Options                    │${NORMAL}"
+  echo -e   "${YELLOW}├─────────────────────────────────────────────────────┤${NORMAL}"
+  echo -e   "${YELLOW}│ 1) Install dependencies                             │${NORMAL}"
+  echo -e   "${YELLOW}│ 2) Input required details                           │${NORMAL}"
+  echo -e   "${YELLOW}│ 3) Deploy contract (random)                         │${NORMAL}"
+  echo -e   "${YELLOW}│ 4) Deploy contract (manual)                         │${NORMAL}"
+  echo -e   "${YELLOW}│ 5) Exit                                             │${NORMAL}"
+  echo -e   "${YELLOW}└─────────────────────────────────────────────────────┘${NORMAL}"
+  read -rp "Enter your choice: " CHOICE
+  case "$CHOICE" in
+    1) install_dependencies ;;
+    2) input_required_details ;;
+    3) deploy_multiple_contracts ;;
+    4) deploy_contract_manual ;;
+    5) exit 0 ;;
+    *) show "Invalid choice." error ;;
+  esac
 }
 
-while true; do
-    menu
-done
+while true; do menu; done
