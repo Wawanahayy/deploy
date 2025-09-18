@@ -25,6 +25,7 @@ cd "$SCRIPT_DIR"
 ### Helpers
 rand_alpha() { head -c 32 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c "${1:-10}"; }
 rand_caps3() { head -c 32 /dev/urandom | tr -dc 'A-Z' | head -c 3; }
+have() { command -v "$1" >/dev/null 2>&1; }
 
 ensure_git() {
   if [ ! -d ".git" ]; then
@@ -39,26 +40,19 @@ ensure_foundry() {
     show "Foundry sudah terpasang: $(forge --version | head -n1)"
     return
   fi
-
   show "Installing Foundry (resmi) …" progress
   curl -L https://foundry.paradigm.xyz | bash
-
-  # Tambahkan Foundry ke PATH untuk sesi ini
   export PATH="$HOME/.foundry/bin:$PATH"
-
-  # Inisialisasi toolchain
   if [ -x "$HOME/.foundry/bin/foundryup" ]; then
     "$HOME/.foundry/bin/foundryup"
   else
     foundryup
   fi
-
   show "Foundry: $(forge --version | head -n1)"
 }
 
 ensure_oz() {
   mkdir -p lib
-  # Prefer forge install (auto remapping)
   if [ ! -d "lib/openzeppelin-contracts" ]; then
     show "Installing OpenZeppelin (via forge) …" progress
     set +e
@@ -77,7 +71,7 @@ ensure_oz() {
 write_foundry_toml() {
   cat > foundry.toml <<'TOML'
 [profile.default]
-src = "src"
+src = "contracts"
 out = "out"
 libs = ["lib"]
 remappings = ["@openzeppelin/=lib/openzeppelin-contracts/"]
@@ -115,8 +109,8 @@ mk_contract_file() {
   local TOKEN_NAME="$2"      # e.g., Token_ABC
   local TOKEN_SYMBOL="$3"    # e.g., ABC
   local SUPPLY_WEI="$4"      # e.g., 10000000000 * 10**18
-  mkdir -p src
-  cat > "src/${CONTRACT_NAME}.sol" <<SOL
+  mkdir -p contracts
+  cat > "contracts/${CONTRACT_NAME}.sol" <<SOL
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
@@ -135,6 +129,36 @@ forge_build() {
   forge build -q
 }
 
+json_get() {
+  # usage: echo "$JSON" | json_get key.path.if.needed
+  local key="$1"
+  if have jq; then
+    jq -r ".${key} // empty"
+  elif have python3; then
+    python3 - "$key" <<'PY'
+import sys, json
+k = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+    def get(d, path):
+        cur = d
+        for p in path.split('.'):
+            if isinstance(cur, dict):
+                cur = cur.get(p, "")
+            else:
+                cur = ""
+        return cur if cur is not None else ""
+    v = get(data, k)
+    print(v)
+except Exception:
+    print("")
+PY
+  else
+    # super simple fallback (best effort)
+    sed -n "s/.*\"${key}\":\"\\([^\"]*\\)\".*/\\1/p" | head -n1
+  fi
+}
+
 deploy_one() {
   local CONTRACT_NAME="$1"
   local TOKEN_NAME="$2"
@@ -146,30 +170,63 @@ deploy_one() {
   forge_build
 
   show "Deploying $CONTRACT_NAME (${TOKEN_NAME}/${TOKEN_SYMBOL})…" progress
+
+  # Run in JSON mode; keep stdout JSON & stderr separate
+  : > .last_deploy.err
   set +e
-  DEPLOY_OUTPUT=$(forge create "src/${CONTRACT_NAME}.sol:${CONTRACT_NAME}" \
+  forge create "contracts/${CONTRACT_NAME}.sol:${CONTRACT_NAME}" \
     --rpc-url "$RPC_URL" \
-    --private-key "$PRIVATE_KEY" 2>&1)
+    --private-key "$PRIVATE_KEY" \
+    --json > .last_deploy.json 2> .last_deploy.err
   local rc=$?
   set -e
 
   if [ $rc -ne 0 ]; then
-    echo "$DEPLOY_OUTPUT"
+    cat .last_deploy.err >&2 || true
+    # Sometimes forge still writes partial JSON; show some context:
+    [ -s .last_deploy.json ] && sed -n '1,120p' .last_deploy.json || true
     show "Deployment failed." error
     exit 1
   fi
 
-  echo "$DEPLOY_OUTPUT" | sed -n '1,120p'
-  local CONTRACT_ADDRESS
-  CONTRACT_ADDRESS=$(awk '/Deployed to:/ {print $3}' <<< "$DEPLOY_OUTPUT" | tail -n1)
+  # Try standard keys
+  local TX_HASH ADDR
+  TX_HASH=$(cat .last_deploy.json | json_get transactionHash)
+  ADDR=$(cat .last_deploy.json | json_get deployedTo)
 
-  if [[ ! "$CONTRACT_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
+  # Receipt fallback (node lag)
+  if [[ ! "$ADDR" =~ ^0x[0-9a-fA-F]{40}$ ]] && [ -n "$TX_HASH" ] && have cast; then
+    ADDR=$(cast receipt "$TX_HASH" contractAddress --rpc-url "$RPC_URL" 2>/dev/null || true)
+    if [[ ! "$ADDR" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
+      ADDR=$(cast receipt "$TX_HASH" --json --rpc-url "$RPC_URL" 2>/dev/null | json_get contractAddress)
+    fi
+  fi
+
+  # Legacy text fallback
+  if [[ ! "$ADDR" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
+    ADDR=$(sed -n 's/.*Deployed to:[[:space:]]*\(0x[0-9a-fA-F]\{40\}\).*/\1/p' .last_deploy.json | tail -n1)
+  fi
+
+  # Compute-address fallback (needs deployer + nonce in JSON)
+  if [[ ! "$ADDR" =~ ^0x[0-9a-fA-F]{40}$ ]] && have cast; then
+    local DEPLOYER NONCE
+    DEPLOYER=$(cat .last_deploy.json | json_get deployer)
+    NONCE=$(cat .last_deploy.json | json_get nonce)
+    if [[ "$DEPLOYER" =~ ^0x[0-9a-fA-F]{40}$ ]] && [ -n "$NONCE" ]; then
+      ADDR=$(cast compute-address "$DEPLOYER" --nonce "$NONCE" 2>/dev/null || true)
+    fi
+  fi
+
+  if [[ ! "$ADDR" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
     show "Could not parse contract address." error
+    echo "Hints:"
+    echo "  • TX hash (jika ada) di .last_deploy.json → cast receipt <txhash> contractAddress --rpc-url \"$RPC_URL\""
+    echo "  • Atau compute: cast compute-address <deployer> --nonce <nonce>"
     exit 1
   fi
 
-  echo "$(date -Iseconds) | $CONTRACT_NAME | $TOKEN_NAME/$TOKEN_SYMBOL | $CONTRACT_ADDRESS" | tee -a deployed.txt >/dev/null
-  show "$CONTRACT_NAME deployed at: $CONTRACT_ADDRESS"
+  echo "$(date -Iseconds) | $CONTRACT_NAME | $TOKEN_NAME/$TOKEN_SYMBOL | $ADDR" | tee -a deployed.txt >/dev/null
+  show "$CONTRACT_NAME deployed at: $ADDR"
 
   echo "Waiting $DELAY_TIME seconds…"
   sleep "$DELAY_TIME"
@@ -204,13 +261,13 @@ deploy_contract_manual() {
   echo "-----------------------------------"
   ensure_env
   read -r -p "Contract name (e.g., RandomToken): " CONTRACT_NAME
+  case "$CONTRACT_NAME" in
+    this|super|_*) show "Nama kontrak '$CONTRACT_NAME' terlarang (reserved/bad)." error; exit 1;;
+  esac
   read -r -p "Token name: " TOKEN_NAME
   read -r -p "Token symbol (3–6 caps): " TOKEN_SYMBOL
   read -r -p "Initial supply (token units, e.g., 10000000000): " INITIAL_SUPPLY
-  : "${CONTRACT_NAME:?}"
-  : "${TOKEN_NAME:?}"
-  : "${TOKEN_SYMBOL:?}"
-  : "${INITIAL_SUPPLY:?}"
+  : "${CONTRACT_NAME:?}"; : "${TOKEN_NAME:?}"; : "${TOKEN_SYMBOL:?}"; : "${INITIAL_SUPPLY:?}"
   deploy_one "$CONTRACT_NAME" "$TOKEN_NAME" "$TOKEN_SYMBOL" "$INITIAL_SUPPLY"
 }
 
