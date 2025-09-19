@@ -105,33 +105,38 @@ deploy_contract() {
     }
 EOL
 
-    # ====== SIMPLE LOGS: COMPILE ======
-    if forge build \
-      2> >(grep -v 'note\[unaliased-plain-import\]' >&2) \
-      >/dev/null; then
+    # ====== SIMPLE LOGS: COMPILE (mute semua output) ======
+    if forge build >/dev/null 2>&1; then
         echo "noteds: warm compile"
     else
         show "Contract $contract_number compilation failed." "error"
         exit 1
     fi
 
-    # ====== SIMPLE LOGS: DEPLOY ======
+    # ====== SIMPLE LOGS: DEPLOY (tangkap output, jangan tampilkan) ======
     DEPLOY_OUTPUT=$(forge create "$SCRIPT_DIR/src/RandomToken.sol:RandomToken" \
         --rpc-url "$RPC_URL" \
         --private-key "$PRIVATE_KEY" \
-        --broadcast \
-        2> >(grep -v 'note\[unaliased-plain-import\]' >&2))
+        --broadcast 2>&1)
 
     if [[ $? -ne 0 ]]; then
         show "Deployment of contract $contract_number failed." "error"
         exit 1
     fi
 
+    # Ambil tx hash & address (penuh)
+    TX_HASH=$(echo "$DEPLOY_OUTPUT" | sed -n 's/.*Transaction hash: \(0x[0-9a-fA-F]\{64\}\).*/\1/p')
+    [[ -z "$TX_HASH" ]] && TX_HASH=$(echo "$DEPLOY_OUTPUT" | grep -oE '0x[0-9a-fA-F]{64}' | head -n1)
+
     CONTRACT_ADDRESS=$(echo "$DEPLOY_OUTPUT" | sed -n 's/.*Deployed to: \(0x[0-9a-fA-F]\{40\}\).*/\1/p')
+    [[ -z "$CONTRACT_ADDRESS" ]] && CONTRACT_ADDRESS=$(echo "$DEPLOY_OUTPUT" | grep -oE '0x[0-9a-fA-F]{40}' | tail -n1)
+
     if [[ -z "$CONTRACT_ADDRESS" ]]; then
         show "Deployment of contract $contract_number failed (no address found)." "error"
         exit 1
     fi
+
+    [[ -n "$TX_HASH" ]] && echo "noteds: warm tx    -> $TX_HASH"
     echo "noteds: warm deploy -> $CONTRACT_ADDRESS"
 
     # Tambahkan delay antara transaksi
@@ -170,33 +175,38 @@ deploy_contract_manual() {
     }
 EOL
 
-    # ====== SIMPLE LOGS: COMPILE ======
-    if forge build \
-      2> >(grep -v 'note\[unaliased-plain-import\]' >&2) \
-      >/dev/null; then
+    # ====== SIMPLE LOGS: COMPILE (mute semua output) ======
+    if forge build >/dev/null 2>&1; then
         echo "noteds: warm compile"
     else
         show "$CONTRACT_NAME contract compilation failed." "error"
         exit 1
     fi
 
-    # ====== SIMPLE LOGS: DEPLOY ======
+    # ====== SIMPLE LOGS: DEPLOY (tangkap output, jangan tampilkan) ======
     DEPLOY_OUTPUT=$(forge create "$SCRIPT_DIR/src/$CONTRACT_NAME.sol:$CONTRACT_NAME" \
         --rpc-url "$RPC_URL" \
         --private-key "$PRIVATE_KEY" \
-        --broadcast \
-        2> >(grep -v 'note\[unaliased-plain-import\]' >&2))
+        --broadcast 2>&1)
 
     if [[ $? -ne 0 ]]; then
         show "Deployment of $CONTRACT_NAME contract failed." "error"
         exit 1
     fi
 
+    # Ambil tx hash & address (penuh)
+    TX_HASH=$(echo "$DEPLOY_OUTPUT" | sed -n 's/.*Transaction hash: \(0x[0-9a-fA-F]\{64\}\).*/\1/p')
+    [[ -z "$TX_HASH" ]] && TX_HASH=$(echo "$DEPLOY_OUTPUT" | grep -oE '0x[0-9a-fA-F]{64}' | head -n1)
+
     CONTRACT_ADDRESS=$(echo "$DEPLOY_OUTPUT" | sed -n 's/.*Deployed to: \(0x[0-9a-fA-F]\{40\}\).*/\1/p')
+    [[ -z "$CONTRACT_ADDRESS" ]] && CONTRACT_ADDRESS=$(echo "$DEPLOY_OUTPUT" | grep -oE '0x[0-9a-fA-F]{40}' | tail -n1)
+
     if [[ -z "$CONTRACT_ADDRESS" ]]; then
         show "Deployment of $CONTRACT_NAME contract failed (no address found)." "error"
         exit 1
     fi
+
+    [[ -n "$TX_HASH" ]] && echo "noteds: warm tx    -> $TX_HASH"
     echo "noteds: warm deploy -> $CONTRACT_ADDRESS"
 
     # Tambahkan delay antara transaksi
