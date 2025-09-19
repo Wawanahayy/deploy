@@ -27,6 +27,15 @@ rand_alpha() { head -c 32 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c "${1:-10}"
 rand_caps3() { head -c 32 /dev/urandom | tr -dc 'A-Z' | head -c 3; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+reset_workspace() {
+  rm -rf contracts out cache target .last_deploy.json .last_deploy.err 2>/dev/null || true
+  mkdir -p contracts
+}
+
+final_cleanup() {
+  rm -rf contracts out cache target .last_deploy.json .last_deploy.err 2>/dev/null || true
+}
+
 ensure_git() {
   if [ ! -d ".git" ]; then
     show "Initializing Git repository…" progress
@@ -34,7 +43,7 @@ ensure_git() {
   fi
 }
 
-# ==== RECOMMENDED: Foundry via official installer (no plex.sh) ====
+# ==== Foundry via official installer ====
 ensure_foundry() {
   if command -v forge >/dev/null 2>&1; then
     show "Foundry sudah terpasang: $(forge --version | head -n1)"
@@ -84,31 +93,69 @@ TOML
 ensure_env() {
   mkdir -p token_deployment
   local ENV="token_deployment/.env"
-  if [ ! -f "$ENV" ]; then
-    echo "-----------------------------------"
-    read -r -p "Enter your Private Key (0x…): " PRIVATE_KEY
-    read -r -p "Enter the RPC URL: " RPC_URL
-    read -r -p "Delay between deployments (seconds): " DELAY_TIME
-    cat > "$ENV" <<EOF
-PRIVATE_KEY="$PRIVATE_KEY"
-RPC_URL="$RPC_URL"
-DELAY_TIME="${DELAY_TIME:-2}"
-EOF
-    chmod 600 "$ENV" || true
-    show "Saved credentials to $ENV"
+
+  ask() {
+    local prompt="$1" default="$2" secret="${3:-no}" val
+    if [ "$secret" = "yes" ]; then
+      read -r -s -p "$prompt" val; echo
+    else
+      read -r -p "$prompt" val
+    fi
+    echo "${val:-$default}"
+  }
+
+  # load existing if any
+  if [ -f "$ENV" ]; then
+    # shellcheck disable=SC1090
+    source "$ENV" || true
   fi
-  # shellcheck disable=SC1090
-  source "$ENV"
-  : "${PRIVATE_KEY:?Missing PRIVATE_KEY in .env}"
-  : "${RPC_URL:?Missing RPC_URL in .env}"
-  : "${DELAY_TIME:=2}"
+
+  local _PK="${PRIVATE_KEY:-}"
+  local _RPC="${RPC_URL:-}"
+  local _DELAY="${DELAY_TIME:-}"
+  local _MAX="${ENV_MAX_USES:-}"
+  local _LEFT="${ENV_USES_LEFT:-}"
+
+  if [ -z "$_PK" ];   then _PK=$(ask "Enter your Private Key (0x… 64 hex, hidden): " "" yes); fi
+  if [ -z "$_RPC" ];  then _RPC=$(ask "Enter the RPC URL: " ""); fi
+  if [ -z "$_DELAY" ]; then _DELAY=$(ask "Delay between deployments (seconds) [2]: " "2"); fi
+  if [ -z "$_MAX" ];  then _MAX=$(ask "How many deployments before wiping .env? [1]: " "1"); fi
+
+  # normalize/validate
+  _DELAY="${_DELAY:-2}"
+  _MAX="${_MAX:-1}"
+  if ! [[ "$_PK" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
+    show "Private key tidak valid (harus 0x + 64 hex)." error; exit 1
+  fi
+  if ! [[ "$_RPC" =~ ^https?:// ]]; then
+    show "RPC URL tidak valid (harus http/https)." error; exit 1
+  fi
+  if ! [[ "$_DELAY" =~ ^[0-9]+$ ]]; then
+    show "DELAY_TIME harus angka (detik)." error; exit 1
+  fi
+  if ! [[ "$_MAX" =~ ^[0-9]+$ ]] || [ "$_MAX" -lt 1 ]; then
+    show "ENV_MAX_USES harus angka >=1." error; exit 1
+  fi
+
+  # init uses_left if missing
+  if [ -z "$_LEFT" ]; then _LEFT="$_MAX"; fi
+
+  # write back
+  cat > "$ENV" <<EOF
+PRIVATE_KEY="$_PK"
+RPC_URL="$_RPC"
+DELAY_TIME="$_DELAY"
+ENV_MAX_USES="$_MAX"
+ENV_USES_LEFT="$_LEFT"
+EOF
+  chmod 600 "$ENV" || true
+
+  export PRIVATE_KEY="$_PK" RPC_URL="$_RPC" DELAY_TIME="$_DELAY" ENV_MAX_USES="$_MAX" ENV_USES_LEFT="$_LEFT"
+  show "Saved credentials to $ENV (uses left: $ENV_USES_LEFT)"
 }
 
 mk_contract_file() {
-  local CONTRACT_NAME="$1"   # e.g., RandomToken
-  local TOKEN_NAME="$2"      # e.g., Token_ABC
-  local TOKEN_SYMBOL="$3"    # e.g., ABC
-  local SUPPLY_WEI="$4"      # e.g., 10000000000 * 10**18
+  local CONTRACT_NAME="$1"; local TOKEN_NAME="$2"; local TOKEN_SYMBOL="$3"; local SUPPLY_WEI="$4"
   mkdir -p contracts
   cat > "contracts/${CONTRACT_NAME}.sol" <<SOL
 // SPDX-License-Identifier: MIT
@@ -130,7 +177,6 @@ forge_build() {
 }
 
 json_get() {
-  # usage: echo "$JSON" | json_get key.path.if.needed
   local key="$1"
   if have jq; then
     jq -r ".${key} // empty"
@@ -139,23 +185,46 @@ json_get() {
 import sys, json
 k = sys.argv[1]
 try:
-    data = json.load(sys.stdin)
-    def get(d, path):
-        cur = d
-        for p in path.split('.'):
-            if isinstance(cur, dict):
-                cur = cur.get(p, "")
-            else:
-                cur = ""
-        return cur if cur is not None else ""
-    v = get(data, k)
-    print(v)
+    d = json.load(sys.stdin)
+    for part in k.split('.'):
+        d = d.get(part, {})
+    if isinstance(d, (dict, list)): print("")
+    else: print(d if d is not None else "")
 except Exception:
     print("")
 PY
   else
-    # super simple fallback (best effort)
     sed -n "s/.*\"${key}\":\"\\([^\"]*\\)\".*/\\1/p" | head -n1
+  fi
+}
+
+_after_success_decrement_or_wipe() {
+  local ENV="token_deployment/.env"
+  local left="${ENV_USES_LEFT:-1}"
+  local max="${ENV_MAX_USES:-1}"
+  if ! [[ "$left" =~ ^[0-9]+$ ]]; then left=1; fi
+  if ! [[ "$max"  =~ ^[0-9]+$ ]]; then max=1; fi
+
+  if [ "$left" -le 1 ]; then
+    # wipe .env
+    rm -f "$ENV"
+    unset PRIVATE_KEY RPC_URL DELAY_TIME ENV_MAX_USES ENV_USES_LEFT
+    show "ENV wiped after reaching max uses ($max)."
+  else
+    left=$(( left - 1 ))
+    ENV_USES_LEFT="$left"
+    export ENV_USES_LEFT
+    # update file
+    # shellcheck disable=SC1090
+    {
+      echo "PRIVATE_KEY=\"${PRIVATE_KEY:-}\""
+      echo "RPC_URL=\"${RPC_URL:-}\""
+      echo "DELAY_TIME=\"${DELAY_TIME:-2}\""
+      echo "ENV_MAX_USES=\"${ENV_MAX_USES:-$max}\""
+      echo "ENV_USES_LEFT=\"$left\""
+    } > "$ENV"
+    chmod 600 "$ENV" || true
+    show "ENV uses left: $left"
   fi
 }
 
@@ -163,15 +232,16 @@ deploy_one() {
   local CONTRACT_NAME="$1"
   local TOKEN_NAME="$2"
   local TOKEN_SYMBOL="$3"
-  local SUPPLY_TOKENS="$4"   # plain token units, multiplied by 10**decimals in Solidity
+  local SUPPLY_TOKENS="$4"
   local SUPPLY_WEI="(${SUPPLY_TOKENS} * (10 ** decimals()))"
 
+  # fresh workspace
+  reset_workspace
   mk_contract_file "$CONTRACT_NAME" "$TOKEN_NAME" "$TOKEN_SYMBOL" "$SUPPLY_WEI"
   forge_build
 
   show "Deploying $CONTRACT_NAME (${TOKEN_NAME}/${TOKEN_SYMBOL})…" progress
 
-  # Run in JSON mode; keep stdout JSON & stderr separate
   : > .last_deploy.err
   set +e
   forge create "contracts/${CONTRACT_NAME}.sol:${CONTRACT_NAME}" \
@@ -183,53 +253,44 @@ deploy_one() {
 
   if [ $rc -ne 0 ]; then
     cat .last_deploy.err >&2 || true
-    # Sometimes forge still writes partial JSON; show some context:
     [ -s .last_deploy.json ] && sed -n '1,120p' .last_deploy.json || true
+    final_cleanup
     show "Deployment failed." error
     exit 1
   fi
 
-  # Try standard keys
   local TX_HASH ADDR
   TX_HASH=$(cat .last_deploy.json | json_get transactionHash)
   ADDR=$(cat .last_deploy.json | json_get deployedTo)
 
-  # Receipt fallback (node lag)
   if [[ ! "$ADDR" =~ ^0x[0-9a-fA-F]{40}$ ]] && [ -n "$TX_HASH" ] && have cast; then
     ADDR=$(cast receipt "$TX_HASH" contractAddress --rpc-url "$RPC_URL" 2>/dev/null || true)
     if [[ ! "$ADDR" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
       ADDR=$(cast receipt "$TX_HASH" --json --rpc-url "$RPC_URL" 2>/dev/null | json_get contractAddress)
     fi
   fi
-
-  # Legacy text fallback
   if [[ ! "$ADDR" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
     ADDR=$(sed -n 's/.*Deployed to:[[:space:]]*\(0x[0-9a-fA-F]\{40\}\).*/\1/p' .last_deploy.json | tail -n1)
   fi
 
-  # Compute-address fallback (needs deployer + nonce in JSON)
-  if [[ ! "$ADDR" =~ ^0x[0-9a-fA-F]{40}$ ]] && have cast; then
-    local DEPLOYER NONCE
-    DEPLOYER=$(cat .last_deploy.json | json_get deployer)
-    NONCE=$(cat .last_deploy.json | json_get nonce)
-    if [[ "$DEPLOYER" =~ ^0x[0-9a-fA-F]{40}$ ]] && [ -n "$NONCE" ]; then
-      ADDR=$(cast compute-address "$DEPLOYER" --nonce "$NONCE" 2>/dev/null || true)
-    fi
-  fi
-
   if [[ ! "$ADDR" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
+    final_cleanup
     show "Could not parse contract address." error
     echo "Hints:"
-    echo "  • TX hash (jika ada) di .last_deploy.json → cast receipt <txhash> contractAddress --rpc-url \"$RPC_URL\""
-    echo "  • Atau compute: cast compute-address <deployer> --nonce <nonce>"
+    echo "  • TX hash di .last_deploy.json → cast receipt <txhash> contractAddress --rpc-url \"$RPC_URL\""
+    echo "  • compute: cast compute-address <deployer> --nonce <nonce>"
     exit 1
   fi
 
   echo "$(date -Iseconds) | $CONTRACT_NAME | $TOKEN_NAME/$TOKEN_SYMBOL | $ADDR" | tee -a deployed.txt >/dev/null
   show "$CONTRACT_NAME deployed at: $ADDR"
 
-  echo "Waiting $DELAY_TIME seconds…"
-  sleep "$DELAY_TIME"
+  # Bersih total dan kurangi counter .env
+  final_cleanup
+  _after_success_decrement_or_wipe
+
+  echo "Waiting ${DELAY_TIME:-2} seconds…"
+  sleep "${DELAY_TIME:-2}"
 }
 
 install_dependencies() {
@@ -261,9 +322,7 @@ deploy_contract_manual() {
   echo "-----------------------------------"
   ensure_env
   read -r -p "Contract name (e.g., RandomToken): " CONTRACT_NAME
-  case "$CONTRACT_NAME" in
-    this|super|_*) show "Nama kontrak '$CONTRACT_NAME' terlarang (reserved/bad)." error; exit 1;;
-  esac
+  case "$CONTRACT_NAME" in this|super|_*) show "Nama kontrak '$CONTRACT_NAME' terlarang." error; exit 1;; esac
   read -r -p "Token name: " TOKEN_NAME
   read -r -p "Token symbol (3–6 caps): " TOKEN_SYMBOL
   read -r -p "Initial supply (token units, e.g., 10000000000): " INITIAL_SUPPLY
@@ -276,13 +335,26 @@ deploy_multiple_contracts() {
   ensure_env
   read -r -p "How many contracts to deploy? " NUM
   if ! [[ "$NUM" =~ ^[0-9]+$ ]] || [ "$NUM" -lt 1 ]; then
-    show "Invalid number." error
-    exit 1
+    show "Invalid number." error; exit 1
   fi
   read -r -p "Base supply per token (default 10000000000): " SUPPLY
   SUPPLY="${SUPPLY:-10000000000}"
 
   for ((i=1; i<=NUM; i++)); do
+    # jika .env sudah di-wipe karena batas habis, stop loop
+    if [ ! -f token_deployment/.env ]; then
+      show ".env already wiped — stopping multi deploy." error
+      break
+    fi
+    # reload sisa counter
+    # shellcheck disable=SC1090
+    source token_deployment/.env || true
+    local left="${ENV_USES_LEFT:-1}"
+    if ! [[ "$left" =~ ^[0-9]+$ ]] || [ "$left" -lt 1 ]; then
+      show "No uses left — stopping." error
+      break
+    fi
+
     local NAME="Token_$(rand_alpha 10)"
     local SYM="$(rand_caps3)"
     deploy_one "RandomToken" "$NAME" "$SYM" "$SUPPLY"
@@ -313,6 +385,10 @@ menu() {
   esac
 }
 
-# ---- main loop ----
+# ---- main flow ----
 install_dependencies || true
+ensure_env           || true
+# Auto-deploy sekali SEBELUM menu (random)
+deploy_contract_random || true
+# Lalu tampilkan menu terus-menerus
 while true; do menu; done
