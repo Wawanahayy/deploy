@@ -27,11 +27,11 @@ rand_alpha() { head -c 32 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c "${1:-10}"
 rand_caps3() { head -c 32 /dev/urandom | tr -dc 'A-Z' | head -c 3; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Workspace isolation
 reset_workspace() {
   rm -rf contracts out cache target .last_deploy.json .last_deploy.err 2>/dev/null || true
   mkdir -p contracts
 }
-
 final_cleanup() {
   rm -rf contracts out cache target .last_deploy.json .last_deploy.err 2>/dev/null || true
 }
@@ -43,7 +43,7 @@ ensure_git() {
   fi
 }
 
-# ==== Foundry via official installer ====
+# Foundry (resmi)
 ensure_foundry() {
   if command -v forge >/dev/null 2>&1; then
     show "Foundry sudah terpasang: $(forge --version | head -n1)"
@@ -90,6 +90,7 @@ optimizer_runs = 200
 TOML
 }
 
+# .env with PK hidden + accepts no-0x and @file; newline after PK ensured
 ensure_env() {
   mkdir -p token_deployment
   local ENV="token_deployment/.env"
@@ -97,10 +98,16 @@ ensure_env() {
   ask() {
     local prompt="$1" default="$2" secret="${3:-no}" val
     if [ "$secret" = "yes" ]; then
-      read -r -s -p "$prompt" val; echo
+      # hidden input
+      read -r -s -p "$prompt" val
+      # pastikan prompt berikut muncul di baris baru
+      echo
+      printf "\n"
     else
       read -r -p "$prompt" val
     fi
+    # trim whitespace
+    val="$(printf "%s" "$val" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
     echo "${val:-$default}"
   }
 
@@ -110,22 +117,39 @@ ensure_env() {
     source "$ENV" || true
   fi
 
+  # allow overrides from env
   local _PK="${PRIVATE_KEY:-}"
+  local _PK_FILE="${PRIVATE_KEY_FILE:-}"
   local _RPC="${RPC_URL:-}"
   local _DELAY="${DELAY_TIME:-}"
   local _MAX="${ENV_MAX_USES:-}"
   local _LEFT="${ENV_USES_LEFT:-}"
 
-  if [ -z "$_PK" ];   then _PK=$(ask "Enter your Private Key (0x… 64 hex, hidden): " "" yes); fi
-  if [ -z "$_RPC" ];  then _RPC=$(ask "Enter the RPC URL: " ""); fi
-  if [ -z "$_DELAY" ]; then _DELAY=$(ask "Delay between deployments (seconds) [2]: " "2"); fi
-  if [ -z "$_MAX" ];  then _MAX=$(ask "How many deployments before wiping .env? [1]: " "1"); fi
+  # PK from file env var
+  if [ -z "$_PK" ] && [ -n "$_PK_FILE" ] && [ -f "$_PK_FILE" ]; then
+    _PK="$(tr -d '\r\n' < "$_PK_FILE")"
+  fi
+  # Prompt PK (supports @file)
+  if [ -z "$_PK" ]; then
+    _PK=$(ask "Enter your Private Key (0x… or 64-hex, hidden; or @/path/to/file): " "" yes)
+    if [[ "$_PK" == @* ]]; then
+      local fp="${_PK#@}"
+      if [ -f "$fp" ]; then _PK="$(tr -d '\r\n' < "$fp")"; fi
+    fi
+  fi
+  # normalize PK (add 0x if missing)
+  _PK="$(printf "%s" "$_PK" | tr -d ' \t\r\n')"
+  if [[ "$_PK" =~ ^[0-9a-fA-F]{64}$ ]]; then _PK="0x$_PK"; fi
 
-  # normalize/validate
-  _DELAY="${_DELAY:-2}"
-  _MAX="${_MAX:-1}"
+  # RPC / Delay / Max uses
+  if [ -z "$_RPC" ];   then _RPC=$(ask "Enter the RPC URL: " ""); fi
+  if [ -z "$_DELAY" ]; then _DELAY=$(ask "Delay between deployments (seconds) [2]: " "2"); fi
+  if [ -z "$_MAX" ];   then _MAX=$(ask "How many deployments before wiping .env? [1]: " "1"); fi
+
+  # Validate
   if ! [[ "$_PK" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
-    show "Private key tidak valid (harus 0x + 64 hex)." error; exit 1
+    show "Private key tidak valid. Contoh: 0x0123… (64 hex) atau pakai @/path/to/pk.txt" error
+    exit 1
   fi
   if ! [[ "$_RPC" =~ ^https?:// ]]; then
     show "RPC URL tidak valid (harus http/https)." error; exit 1
@@ -137,10 +161,10 @@ ensure_env() {
     show "ENV_MAX_USES harus angka >=1." error; exit 1
   fi
 
-  # init uses_left if missing
+  # init counter if missing
   if [ -z "$_LEFT" ]; then _LEFT="$_MAX"; fi
 
-  # write back
+  # write env
   cat > "$ENV" <<EOF
 PRIVATE_KEY="$_PK"
 RPC_URL="$_RPC"
@@ -186,10 +210,11 @@ import sys, json
 k = sys.argv[1]
 try:
     d = json.load(sys.stdin)
-    for part in k.split('.'):
-        d = d.get(part, {})
-    if isinstance(d, (dict, list)): print("")
-    else: print(d if d is not None else "")
+    for p in k.split('.'):
+        if isinstance(d, dict): d = d.get(p, "")
+        else: d = ""
+    if d is None or isinstance(d, (dict, list)): print("")
+    else: print(d)
 except Exception:
     print("")
 PY
@@ -202,11 +227,10 @@ _after_success_decrement_or_wipe() {
   local ENV="token_deployment/.env"
   local left="${ENV_USES_LEFT:-1}"
   local max="${ENV_MAX_USES:-1}"
-  if ! [[ "$left" =~ ^[0-9]+$ ]]; then left=1; fi
-  if ! [[ "$max"  =~ ^[0-9]+$ ]]; then max=1; fi
+  [[ "$left" =~ ^[0-9]+$ ]] || left=1
+  [[ "$max"  =~ ^[0-9]+$ ]] || max=1
 
   if [ "$left" -le 1 ]; then
-    # wipe .env
     rm -f "$ENV"
     unset PRIVATE_KEY RPC_URL DELAY_TIME ENV_MAX_USES ENV_USES_LEFT
     show "ENV wiped after reaching max uses ($max)."
@@ -214,8 +238,6 @@ _after_success_decrement_or_wipe() {
     left=$(( left - 1 ))
     ENV_USES_LEFT="$left"
     export ENV_USES_LEFT
-    # update file
-    # shellcheck disable=SC1090
     {
       echo "PRIVATE_KEY=\"${PRIVATE_KEY:-}\""
       echo "RPC_URL=\"${RPC_URL:-}\""
@@ -235,7 +257,6 @@ deploy_one() {
   local SUPPLY_TOKENS="$4"
   local SUPPLY_WEI="(${SUPPLY_TOKENS} * (10 ** decimals()))"
 
-  # fresh workspace
   reset_workspace
   mk_contract_file "$CONTRACT_NAME" "$TOKEN_NAME" "$TOKEN_SYMBOL" "$SUPPLY_WEI"
   forge_build
@@ -285,7 +306,6 @@ deploy_one() {
   echo "$(date -Iseconds) | $CONTRACT_NAME | $TOKEN_NAME/$TOKEN_SYMBOL | $ADDR" | tee -a deployed.txt >/dev/null
   show "$CONTRACT_NAME deployed at: $ADDR"
 
-  # Bersih total dan kurangi counter .env
   final_cleanup
   _after_success_decrement_or_wipe
 
@@ -341,12 +361,10 @@ deploy_multiple_contracts() {
   SUPPLY="${SUPPLY:-10000000000}"
 
   for ((i=1; i<=NUM; i++)); do
-    # jika .env sudah di-wipe karena batas habis, stop loop
     if [ ! -f token_deployment/.env ]; then
       show ".env already wiped — stopping multi deploy." error
       break
     fi
-    # reload sisa counter
     # shellcheck disable=SC1090
     source token_deployment/.env || true
     local left="${ENV_USES_LEFT:-1}"
@@ -388,7 +406,6 @@ menu() {
 # ---- main flow ----
 install_dependencies || true
 ensure_env           || true
-# Auto-deploy sekali SEBELUM menu (random)
+# Auto-deploy sekali SEBELUM menu (random). Matikan baris ini kalau tidak diinginkan.
 deploy_contract_random || true
-# Lalu tampilkan menu terus-menerus
 while true; do menu; done
