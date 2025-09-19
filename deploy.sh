@@ -1,318 +1,291 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
+set -euo pipefail
 
-# Pretty display (optional)
-curl -s https://raw.githubusercontent.com/Wawanahayy/JawaPride-all.sh/refs/heads/main/display.sh | bash || true
+# ================= Banner =================
+curl -fsSL https://raw.githubusercontent.com/Wawanahayy/JawaPride-all.sh/refs/heads/main/display.sh | bash || true
 sleep 1
 
-BOLD=$(tput bold || echo "")
-NORMAL=$(tput sgr0 || echo "")
+BOLD=$(tput bold || true)
+NORMAL=$(tput sgr0 || true)
 PINK='\033[1;35m'
 YELLOW='\033[1;33m'
 
 show() {
-  local msg="${1:-}"; local kind="${2:-ok}"
-  case "$kind" in
-    error)    echo -e "${PINK}${BOLD}❌ $msg${NORMAL}";;
-    progress) echo -e "${PINK}${BOLD}⏳ $msg${NORMAL}";;
-    *)        echo -e "${PINK}${BOLD}✅ $msg${NORMAL}";;
+  case "${2:-ok}" in
+    error)    echo -e "${PINK}${BOLD}❌ $1${NORMAL}";;
+    progress) echo -e "${PINK}${BOLD}⏳ $1${NORMAL}";;
+    *)        echo -e "${PINK}${BOLD}✅ $1${NORMAL}";;
   esac
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-### Helpers
-rand_alpha() { head -c 32 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c "${1:-10}"; }
-rand_caps3() { head -c 32 /dev/urandom | tr -dc 'A-Z' | head -c 3; }
-have() { command -v "$1" >/dev/null 2>&1; }
+# ================ Helpers =================
+ensure_tool() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    show "Installing $1 ..." progress
+    case "$1" in
+      wget) sudo apt-get update -y && sudo apt-get install -y wget ;;
+      curl) sudo apt-get update -y && sudo apt-get install -y curl ;;
+      git)  sudo apt-get update -y && sudo apt-get install -y git  ;;
+      forge)
+        # pakai installer Foundry dari repo kamu
+        source <(wget -O - https://raw.githubusercontent.com/Wawanahayy/deploy/refs/heads/main/plex.sh)
+        ;;
+      *) show "Please install $1 manually." error; exit 1 ;;
+    esac
+  fi
+}
 
-ensure_git() {
+ensure_basics() {
+  ensure_tool git
+  ensure_tool curl
+  ensure_tool wget
+  ensure_tool forge
+
   if [ ! -d ".git" ]; then
-    show "Initializing Git repository…" progress
-    git init >/dev/null 2>&1 || true
+    show "Initializing Git repository..." progress
+    git init -q
   fi
-}
 
-# ==== RECOMMENDED: Foundry via official installer (no plex.sh) ====
-ensure_foundry() {
-  if command -v forge >/dev/null 2>&1; then
-    show "Foundry sudah terpasang: $(forge --version | head -n1)"
-    return
+  # .gitignore minimum
+  if [ ! -f .gitignore ]; then
+cat > .gitignore <<'GIT'
+.env
+.env.*
+!.env.example
+node_modules/
+**/node_modules/
+out/
+cache/
+broadcast/
+lib/
+foundry-cache/
+*.log
+.vercel/
+GIT
   fi
-  show "Installing Foundry (resmi) …" progress
-  curl -L https://foundry.paradigm.xyz | bash
-  export PATH="$HOME/.foundry/bin:$PATH"
-  if [ -x "$HOME/.foundry/bin/foundryup" ]; then
-    "$HOME/.foundry/bin/foundryup"
-  else
-    foundryup
-  fi
-  show "Foundry: $(forge --version | head -n1)"
-}
 
-ensure_oz() {
-  mkdir -p lib
+  # forge project skeleton (kalau belum ada)
+  mkdir -p src lib token_deployment
+
+  # OpenZeppelin Contracts
   if [ ! -d "lib/openzeppelin-contracts" ]; then
-    show "Installing OpenZeppelin (via forge) …" progress
-    set +e
-    forge install OpenZeppelin/openzeppelin-contracts --no-commit >/dev/null 2>&1
-    local rc=$?
-    set -e
-    if [ $rc -ne 0 ]; then
-      show "forge install failed. Fallback to git clone…" progress
-      git clone --depth=1 https://github.com/OpenZeppelin/openzeppelin-contracts.git lib/openzeppelin-contracts
-    fi
+    show "Installing OpenZeppelin Contracts..." progress
+    git clone --depth 1 https://github.com/OpenZeppelin/openzeppelin-contracts.git lib/openzeppelin-contracts
   else
-    show "OpenZeppelin already present."
+    show "OpenZeppelin Contracts already installed."
   fi
-}
 
-write_foundry_toml() {
-  cat > foundry.toml <<'TOML'
+  # foundry.toml
+cat > foundry.toml <<'TOML'
 [profile.default]
-src = "contracts"
+src = "src"
 out = "out"
 libs = ["lib"]
-remappings = ["@openzeppelin/=lib/openzeppelin-contracts/"]
-solc_version = "0.8.26"
+solc = "0.8.26"
 optimizer = true
 optimizer_runs = 200
+
+# Remappings wajib untuk import OZ
+remappings = [
+  "@openzeppelin/=lib/openzeppelin-contracts/"
+]
+
+[fmt]
+line_length = 100
+
+[rpc_endpoints]
+# akan diisi dinamis via --rpc-url, key ini tetap boleh ada
+default = "http://localhost:8545"
 TOML
 }
 
-ensure_env() {
-  mkdir -p token_deployment
-  local ENV="token_deployment/.env"
-  if [ ! -f "$ENV" ]; then
-    echo "-----------------------------------"
-    read -r -p "Enter your Private Key (0x…): " PRIVATE_KEY
-    read -r -p "Enter the RPC URL: " RPC_URL
-    read -r -p "Delay between deployments (seconds): " DELAY_TIME
-    cat > "$ENV" <<EOF
-PRIVATE_KEY="$PRIVATE_KEY"
+# ================ Input ====================
+input_required_details() {
+  echo "-----------------------------------"
+  local ENV="$SCRIPT_DIR/token_deployment/.env"
+  rm -f "$ENV"
+
+  # Random default (boleh terpakai utk deploy 1x)
+  local RAND_NAME;  RAND_NAME=$(head -c 32 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 10)
+  local RAND_SYM;   RAND_SYM=$(head -c 32 /dev/urandom | tr -dc 'A-Z'       | head -c 3)
+  local TOKEN_NAME="Token_${RAND_NAME}"
+  local TOKEN_SYMBOL="${RAND_SYM}"
+
+  # Input aman
+  read -r -p "RPC URL        : " RPC_URL
+  read -r -s -p "Private Key    : " PRIVATE_KEY; echo
+  read -r -p "Delay antar tx (detik): " DELAY_TIME
+
+  umask 077
+  cat > "$ENV" <<EOL
 RPC_URL="$RPC_URL"
+PRIVATE_KEY="$PRIVATE_KEY"
+TOKEN_NAME="$TOKEN_NAME"
+TOKEN_SYMBOL="$TOKEN_SYMBOL"
 DELAY_TIME="${DELAY_TIME:-2}"
-EOF
-    chmod 600 "$ENV" || true
-    show "Saved credentials to $ENV"
-  fi
-  # shellcheck disable=SC1090
-  source "$ENV"
-  : "${PRIVATE_KEY:?Missing PRIVATE_KEY in .env}"
-  : "${RPC_URL:?Missing RPC_URL in .env}"
-  : "${DELAY_TIME:=2}"
+EOL
+  show "Updated .env with your data"
 }
 
-mk_contract_file() {
-  local CONTRACT_NAME="$1"   # e.g., RandomToken
-  local TOKEN_NAME="$2"      # e.g., Token_ABC
-  local TOKEN_SYMBOL="$3"    # e.g., ABC
-  local SUPPLY_WEI="$4"      # e.g., 10000000000 * 10**18
-  mkdir -p contracts
-  cat > "contracts/${CONTRACT_NAME}.sol" <<SOL
+# ============== Build & Deploy =============
+write_contract() {
+  # Arg: NAME SYMBOL INITIAL_SUPPLY
+  local NAME="$1"
+  local SYMBOL="$2"
+  local SUPPLY="$3" # in whole tokens
+
+cat > "$SCRIPT_DIR/src/RandomToken.sol" <<EOL
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
-contract ${CONTRACT_NAME} is ERC20 {
-    constructor() ERC20("${TOKEN_NAME}", "${TOKEN_SYMBOL}") {
-        _mint(msg.sender, ${SUPPLY_WEI});
+contract RandomToken is ERC20 {
+    constructor() ERC20("$NAME", "$SYMBOL") {
+        _mint(msg.sender, $SUPPLY * (10 ** decimals()));
     }
 }
-SOL
+EOL
 }
 
-forge_build() {
-  show "Compiling contracts…" progress
-  forge build -q
+compile_contract() {
+  show "Compiling contract..." progress
+  forge build
 }
 
-json_get() {
-  # usage: echo "$JSON" | json_get key.path.if.needed
-  local key="$1"
-  if have jq; then
-    jq -r ".${key} // empty"
-  elif have python3; then
-    python3 - "$key" <<'PY'
-import sys, json
-k = sys.argv[1]
-try:
-    data = json.load(sys.stdin)
-    def get(d, path):
-        cur = d
-        for p in path.split('.'):
-            if isinstance(cur, dict):
-                cur = cur.get(p, "")
-            else:
-                cur = ""
-        return cur if cur is not None else ""
-    v = get(data, k)
-    print(v)
-except Exception:
-    print("")
-PY
-  else
-    # super simple fallback (best effort)
-    sed -n "s/.*\"${key}\":\"\\([^\"]*\\)\".*/\\1/p" | head -n1
-  fi
-}
-
-deploy_one() {
-  local CONTRACT_NAME="$1"
-  local TOKEN_NAME="$2"
-  local TOKEN_SYMBOL="$3"
-  local SUPPLY_TOKENS="$4"   # plain token units, multiplied by 10**decimals in Solidity
-  local SUPPLY_WEI="(${SUPPLY_TOKENS} * (10 ** decimals()))"
-
-  mk_contract_file "$CONTRACT_NAME" "$TOKEN_NAME" "$TOKEN_SYMBOL" "$SUPPLY_WEI"
-  forge_build
-
-  show "Deploying $CONTRACT_NAME (${TOKEN_NAME}/${TOKEN_SYMBOL})…" progress
-
-  # Run in JSON mode; keep stdout JSON & stderr separate
-  : > .last_deploy.err
-  set +e
-  forge create "contracts/${CONTRACT_NAME}.sol:${CONTRACT_NAME}" \
+do_deploy() {
+  # expects RPC_URL, PRIVATE_KEY in env
+  local DEPLOY_OUTPUT
+  DEPLOY_OUTPUT=$(forge create "src/RandomToken.sol:RandomToken" \
     --rpc-url "$RPC_URL" \
     --private-key "$PRIVATE_KEY" \
-    --json > .last_deploy.json 2> .last_deploy.err
-  local rc=$?
-  set -e
+    --broadcast 2>&1 | tee /dev/stderr)
 
-  if [ $rc -ne 0 ]; then
-    cat .last_deploy.err >&2 || true
-    # Sometimes forge still writes partial JSON; show some context:
-    [ -s .last_deploy.json ] && sed -n '1,120p' .last_deploy.json || true
-    show "Deployment failed." error
+  # Ambil address
+  local CONTRACT_ADDRESS
+  CONTRACT_ADDRESS=$(echo "$DEPLOY_OUTPUT" | grep -oE 'Deployed to: 0x[a-fA-F0-9]{40}' | awk '{print $3}' || true)
+
+  if [ -z "${CONTRACT_ADDRESS:-}" ]; then
+    show "Deployment failed (no address found)." error
     exit 1
   fi
 
-  # Try standard keys
-  local TX_HASH ADDR
-  TX_HASH=$(cat .last_deploy.json | json_get transactionHash)
-  ADDR=$(cat .last_deploy.json | json_get deployedTo)
+  show "Deployed at: $CONTRACT_ADDRESS"
+}
 
-  # Receipt fallback (node lag)
-  if [[ ! "$ADDR" =~ ^0x[0-9a-fA-F]{40}$ ]] && [ -n "$TX_HASH" ] && have cast; then
-    ADDR=$(cast receipt "$TX_HASH" contractAddress --rpc-url "$RPC_URL" 2>/dev/null || true)
-    if [[ ! "$ADDR" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
-      ADDR=$(cast receipt "$TX_HASH" --json --rpc-url "$RPC_URL" 2>/dev/null | json_get contractAddress)
-    fi
-  fi
-
-  # Legacy text fallback
-  if [[ ! "$ADDR" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
-    ADDR=$(sed -n 's/.*Deployed to:[[:space:]]*\(0x[0-9a-fA-F]\{40\}\).*/\1/p' .last_deploy.json | tail -n1)
-  fi
-
-  # Compute-address fallback (needs deployer + nonce in JSON)
-  if [[ ! "$ADDR" =~ ^0x[0-9a-fA-F]{40}$ ]] && have cast; then
-    local DEPLOYER NONCE
-    DEPLOYER=$(cat .last_deploy.json | json_get deployer)
-    NONCE=$(cat .last_deploy.json | json_get nonce)
-    if [[ "$DEPLOYER" =~ ^0x[0-9a-fA-F]{40}$ ]] && [ -n "$NONCE" ]; then
-      ADDR=$(cast compute-address "$DEPLOYER" --nonce "$NONCE" 2>/dev/null || true)
-    fi
-  fi
-
-  if [[ ! "$ADDR" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
-    show "Could not parse contract address." error
-    echo "Hints:"
-    echo "  • TX hash (jika ada) di .last_deploy.json → cast receipt <txhash> contractAddress --rpc-url \"$RPC_URL\""
-    echo "  • Atau compute: cast compute-address <deployer> --nonce <nonce>"
+deploy_random_once() {
+  echo "-----------------------------------"
+  # load env
+  if [ ! -f "$SCRIPT_DIR/token_deployment/.env" ]; then
+    show "Environment .env not found, run 'Input required details' first." error
     exit 1
   fi
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/token_deployment/.env"
 
-  echo "$(date -Iseconds) | $CONTRACT_NAME | $TOKEN_NAME/$TOKEN_SYMBOL | $ADDR" | tee -a deployed.txt >/dev/null
-  show "$CONTRACT_NAME deployed at: $ADDR"
+  # generate random NAME/SYMBOL baru setiap deploy
+  local RNAME RSYM
+  RNAME=$(head -c 32 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 10)
+  RSYM=$(head -c 32 /dev/urandom | tr -dc 'A-Z'       | head -c 3)
 
-  echo "Waiting $DELAY_TIME seconds…"
-  sleep "$DELAY_TIME"
+  local NAME="Token_${RNAME}"
+  local SYMBOL="${RSYM}"
+  local SUPPLY=10000000000
+
+  write_contract "$NAME" "$SYMBOL" "$SUPPLY"
+  compile_contract
+  do_deploy
+
+  echo "Waiting ${DELAY_TIME}s before next action..."
+  sleep "${DELAY_TIME}"
 }
 
-install_dependencies() {
-  ensure_git
-  ensure_foundry
-  ensure_oz
-  write_foundry_toml
-  show "Dependencies ready."
-}
-
-input_required_details() {
+deploy_manual() {
   echo "-----------------------------------"
-  ensure_env
-  write_foundry_toml
-  show "Updated foundry & env."
+  if [ ! -f "$SCRIPT_DIR/token_deployment/.env" ]; then
+    show "Environment .env not found, run 'Input required details' first." error
+    exit 1
+  fi
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/token_deployment/.env"
+
+  read -r -p "Contract name (Class) [RandomToken]: " CONTRACT_CLASS
+  CONTRACT_CLASS="${CONTRACT_CLASS:-RandomToken}"
+  read -r -p "Token name        : " NAME
+  read -r -p "Token symbol      : " SYMBOL
+  read -r -p "Initial supply    : " SUPPLY
+
+  # tulis ke file pakai class RandomToken (stabil)
+  write_contract "$NAME" "$SYMBOL" "$SUPPLY"
+  # bila ingin class custom, ganti nama file & 2 baris di bawah — tapi default aman:
+  compile_contract
+  do_deploy
+
+  echo "Waiting ${DELAY_TIME}s before next action..."
+  sleep "${DELAY_TIME}"
 }
 
-deploy_contract_random() {
+deploy_multiple() {
   echo "-----------------------------------"
-  ensure_env
-  local CONTRACT_NAME="RandomToken"
-  local RANDOM_NAME="Token_$(rand_alpha 10)"
-  local RANDOM_SYMBOL="$(rand_caps3)"
-  local SUPPLY="10000000000" # 10B tokens
-  deploy_one "$CONTRACT_NAME" "$RANDOM_NAME" "$RANDOM_SYMBOL" "$SUPPLY"
-}
+  if [ ! -f "$SCRIPT_DIR/token_deployment/.env" ]; then
+    show "Environment .env not found, run 'Input required details' first." error
+    exit 1
+  fi
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/token_deployment/.env"
 
-deploy_contract_manual() {
-  echo "-----------------------------------"
-  ensure_env
-  read -r -p "Contract name (e.g., RandomToken): " CONTRACT_NAME
-  case "$CONTRACT_NAME" in
-    this|super|_*) show "Nama kontrak '$CONTRACT_NAME' terlarang (reserved/bad)." error; exit 1;;
-  esac
-  read -r -p "Token name: " TOKEN_NAME
-  read -r -p "Token symbol (3–6 caps): " TOKEN_SYMBOL
-  read -r -p "Initial supply (token units, e.g., 10000000000): " INITIAL_SUPPLY
-  : "${CONTRACT_NAME:?}"; : "${TOKEN_NAME:?}"; : "${TOKEN_SYMBOL:?}"; : "${INITIAL_SUPPLY:?}"
-  deploy_one "$CONTRACT_NAME" "$TOKEN_NAME" "$TOKEN_SYMBOL" "$INITIAL_SUPPLY"
-}
-
-deploy_multiple_contracts() {
-  echo "-----------------------------------"
-  ensure_env
   read -r -p "How many contracts to deploy? " NUM
-  if ! [[ "$NUM" =~ ^[0-9]+$ ]] || [ "$NUM" -lt 1 ]; then
+  if ! [[ "$NUM" =~ ^[1-9][0-9]*$ ]]; then
     show "Invalid number." error
     exit 1
   fi
-  read -r -p "Base supply per token (default 10000000000): " SUPPLY
-  SUPPLY="${SUPPLY:-10000000000}"
 
-  for ((i=1; i<=NUM; i++)); do
-    local NAME="Token_$(rand_alpha 10)"
-    local SYM="$(rand_caps3)"
-    deploy_one "RandomToken" "$NAME" "$SYM" "$SUPPLY"
+  for (( i=1; i<=NUM; i++ )); do
+    local RNAME RSYM NAME SYMBOL SUPPLY
+    RNAME=$(head -c 32 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 10)
+    RSYM=$(head -c 32 /dev/urandom | tr -dc 'A-Z'       | head -c 3)
+    NAME="Token_${RNAME}"
+    SYMBOL="${RSYM}"
+    SUPPLY=10000000000
+
+    show "[$i/$NUM] Preparing $NAME ($SYMBOL) ..." progress
+    write_contract "$NAME" "$SYMBOL" "$SUPPLY"
+    compile_contract
+    do_deploy
+    echo "Waiting ${DELAY_TIME}s..."
+    sleep "${DELAY_TIME}"
     echo "-----------------------------------"
   done
 }
 
+# ================== Menu ===================
 menu() {
-  echo -e "\n${YELLOW}┌──────────────────────────────────────────────┐${NORMAL}"
-  echo -e   "${YELLOW}│                  Menu                        │${NORMAL}"
-  echo -e   "${YELLOW}├──────────────────────────────────────────────┤${NORMAL}"
-  echo -e   "${YELLOW}│ 1) Install dependencies                      │${NORMAL}"
-  echo -e   "${YELLOW}│ 2) Input/Update .env                         │${NORMAL}"
-  echo -e   "${YELLOW}│ 3) Deploy contract (random)                  │${NORMAL}"
-  echo -e   "${YELLOW}│ 4) Deploy contract (manual)                  │${NORMAL}"
-  echo -e   "${YELLOW}│ 5) Deploy multiple random tokens             │${NORMAL}"
-  echo -e   "${YELLOW}│ 6) Exit                                      │${NORMAL}"
-  echo -e   "${YELLOW}└──────────────────────────────────────────────┘${NORMAL}"
-  read -r -p "Enter choice: " CH
-  case "$CH" in
-    1) install_dependencies;;
-    2) input_required_details;;
-    3) deploy_contract_random;;
-    4) deploy_contract_manual;;
-    5) deploy_multiple_contracts;;
-    6) exit 0;;
-    *) show "Invalid choice." error;;
+  echo -e "\n${YELLOW}┌─────────────────────────────────────────────────────┐${NORMAL}"
+  echo -e   "${YELLOW}│              Script Menu Options                    │${NORMAL}"
+  echo -e   "${YELLOW}├─────────────────────────────────────────────────────┤${NORMAL}"
+  echo -e   "${YELLOW}│ 1) Install dependencies                             │${NORMAL}"
+  echo -e   "${YELLOW}│ 2) Input required details (.env)                     │${NORMAL}"
+  echo -e   "${YELLOW}│ 3) Deploy contract (random, sekali)                 │${NORMAL}"
+  echo -e   "${YELLOW}│ 4) Deploy contract (manual)                         │${NORMAL}"
+  echo -e   "${YELLOW}│ 5) Deploy multiple (semua random)                   │${NORMAL}"
+  echo -e   "${YELLOW}│ 6) Exit                                             │${NORMAL}"
+  echo -e   "${YELLOW}└─────────────────────────────────────────────────────┘${NORMAL}"
+  read -r -p "Enter your choice: " CHOICE
+
+  case "${CHOICE}" in
+    1) ensure_basics ;;
+    2) input_required_details ;;
+    3) deploy_random_once ;;
+    4) deploy_manual ;;
+    5) deploy_multiple ;;
+    6) exit 0 ;;
+    *) show "Invalid choice." error ;;
   esac
 }
 
-# ---- main loop ----
-install_dependencies || true
+# ================ Run ======================
+ensure_basics
 while true; do menu; done
